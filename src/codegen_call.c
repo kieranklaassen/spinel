@@ -19262,6 +19262,409 @@ static void emit_utime_arg_bad(Compiler *c, int node, TyKind t, Buf *b) {
   buf_printf(b, "); sp_raise_cls(\"TypeError\", \"can't convert %s into time\");", cn ? cn : "Object");
 }
 
+static int format_method_is_own(Compiler *c, const char *cls, const char *nm) {
+  int ci = comp_class_index(c, cls);
+  return ci >= 0 && (comp_method_in_chain(c, ci, nm, NULL) >= 0 || comp_reader_in_chain(c, ci, nm, NULL));
+}
+/* Is the format read out of a slot that a variable, a constant or self
+   holds: an attr_reader's or a Struct member's field, an Array's element by
+   an Integer index, its first or its last, or a Hash's value, the index or
+   the key a literal or a read? None of them is the program's own method, and
+   a Hash with a default block may run it. */
+static int format_is_slot_read(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  int recv = unwrap_parens(c, nt_ref(nt, v, "receiver")), alloc = 0;
+  if (recv < 0 || nt_ref(nt, v, "block") >= 0 || comp_ntype(c, v) != TY_STRING ||
+      !(expr_is_held_ref(c, recv) || nt_kind(nt, recv) == NK_GlobalVariableReadNode))
+    return 0;
+  if (call_is_field_read(c, v, &alloc)) return !alloc;
+  const char *nm = nt_str(nt, v, "name");
+  TyKind rt = comp_ntype(c, recv);
+  int a = nt_ref(nt, v, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  int ary = ty_is_array(rt), hash = ty_is_hash(rt);
+  if (!nm || !(ary || hash) || format_method_is_own(c, ary ? "Array" : "Hash", nm)) return 0;
+  if (ary && ac == 0) return sp_streq(nm, "first") || sp_streq(nm, "last");
+  if (!sp_streq(nm, "[]") || ac != 1 ||
+      !(nt_kind(nt, av[0]) == NK_StringNode || subtree_is_pure_read(c, av[0]))) return 0;
+  return ary ? comp_ntype(c, av[0]) == TY_INT : !prog_has_hash_default_block(c);
+}
+/* Does something else hold the format while the arguments are built? A
+   literal and a read that cannot allocate do, so does a read out of a slot
+   (format_is_slot_read), and so does a choice between two of those
+   (`c ? F : rows[0]`, `t || F`). Anything else is a String made where it is
+   written: an interpolation, a copy of a shared String, a call's answer. */
+static int format_is_held(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  if (v < 0 || depth > 8) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode || !operand_may_allocate(c, v)) return 1;
+  if (k == NK_IfNode) {
+    int arm[2] = { nt_ref(nt, v, "statements"), nt_ref(nt, v, "subsequent") };
+    if (arm[1] < 0 || nt_kind(nt, arm[1]) != NK_ElseNode) return 0;
+    arm[1] = nt_ref(nt, arm[1], "statements");
+    for (int i = 0; i < 2; i++) {
+      int n = 0; const int *bb = arm[i] >= 0 ? nt_arr(nt, arm[i], "body", &n) : NULL;
+      if (n != 1 || !format_is_held(c, bb[0], depth + 1)) return 0;
+    }
+    return 1;
+  }
+  if (k == NK_OrNode)
+    return format_is_held(c, nt_ref(nt, v, "left"), depth + 1) &&
+           format_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+  return k == NK_CallNode && format_is_slot_read(c, v);
+}
+/* Did the statement already run the format into a temp of its own, which
+   it roots (a call beside an argument that can see when it ran)? */
+static int format_ran_first(int recv, int r) {
+  return arg_ran_first(recv, 0) || arg_ran_first(r, 0);
+}
+static int format_is_attr_call(const char *nm) {
+  return sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+         sp_streq(nm, "attr_accessor");
+}
+static int format_name_in(const char *nm, const char *const *names) {
+  for (int w = 0; names[w]; w++) if (sp_streq(nm, names[w])) return 1;
+  return 0;
+}
+/* A call of one of these names can define or remove a method and leave no
+   def and no attr of its name in the node table, run a method by a name the
+   table does not show, or run text. A `require` or a `require_relative`
+   still standing is one the parser did not splice in (it replaces each one
+   it reads with the file's text) and the emitter makes a no-op: the file's
+   defs are not in the table. A `load` is refused where it is emitted. */
+static int format_is_word(const char *nm) {
+  static const char *const WORDS[] = {
+    "alias_method", "define_method", "define_singleton_method", "undef_method", "remove_method",
+    "send", "__send__", "public_send", "local_variable_set",
+    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    "def_delegator", "def_delegators", "delegate", "require", "require_relative", NULL };
+  return format_name_in(nm, WORDS);
+}
+/* The calls that answer a method by its name, and the visibility words:
+   counted only where the name they are handed is not a Symbol literal. */
+static int format_is_by_name(const char *nm) {
+  static const char *const NAMES[] = {
+    "method", "public_method", "singleton_method", "instance_method", "public_instance_method", NULL };
+  return format_name_in(nm, NAMES);
+}
+static int format_is_visibility(const char *nm) {
+  static const char *const NAMES[] = {
+    "public", "private", "protected", "module_function", "private_class_method", "public_class_method",
+    NULL };
+  return format_name_in(nm, NAMES);
+}
+/* Is the name one that a call running a method by its name must not be
+   handed (`inject(:send)`, `&:attr_accessor`)? */
+static int format_names_a_word(const char *sv) {
+  return format_is_word(sv) || format_is_attr_call(sv) || format_is_by_name(sv) || format_is_visibility(sv) ||
+         sp_streq(sv, "to_proc") || sp_streq(sv, "inject") || sp_streq(sv, "reduce");
+}
+/* A Symbol literal that names none of them. */
+static int format_is_plain_symbol(const NodeTable *nt, int id) {
+  const char *sv = id >= 0 && nt_kind(nt, id) == NK_SymbolNode ? nt_str(nt, id, "value") : NULL;
+  return sv && !format_names_a_word(sv);
+}
+/* Is the receiver the parameter of the block the parser writes for a
+   `&:name` (`m(&:name)` reaches the table as `m { |_spx| _spx.name }`)? */
+static int format_recv_is_sym_proc(const NodeTable *nt, int call) {
+  int r = nt_ref(nt, call, "receiver");
+  const char *rn = r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode ? nt_str(nt, r, "name") : NULL;
+  return rn && sp_streq(rn, "_spx");
+}
+/* Is the local only ever a `&` parameter: every node of the table that
+   carries its name is a read of it, a `&` parameter, or a call (which
+   binds nothing)? Then it holds a block some caller passed, and each such
+   pass is asked where it stands. `it` and `_1` are bound with no node. */
+static int format_is_block_param(const NodeTable *nt, const char *nm) {
+  if (sp_streq(nm, "it") || (nm[0] == '_' && nm[1] >= '0' && nm[1] <= '9')) return 0;
+  for (int id = 0; id < nt->count; id++) {
+    const char *s = nt_str(nt, id, "name");
+    if (!s || !sp_streq(s, nm)) continue;
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_LocalVariableReadNode && k != NK_BlockParameterNode && k != NK_CallNode) return 0;
+  }
+  return 1;
+}
+/* Can the operand of a `&` only be a block the table holds: none (the
+   anonymous `&` of the def), a Symbol literal that names no word, a `->`
+   literal, or a local that is only ever a `&` parameter? */
+static int format_block_pass_is_plain(const NodeTable *nt, int e) {
+  if (e < 0) return 1;
+  NodeKind k = nt_kind(nt, e);
+  if (k == NK_SymbolNode) return format_is_plain_symbol(nt, e);
+  if (k == NK_LambdaNode) return 1;
+  const char *nm = k == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+  return nm && format_is_block_param(nt, nm);
+}
+/* The answers below walk the whole program, so each is kept once the
+   analysis is done (g_scopes_settled, set in codegen_program when
+   analyze_program has returned; scope_is_shadowed keeps its table from
+   there too): every file the program requires was spliced into the one
+   text that is parsed, and every desugar has run, so the nodes the walks
+   read are all in the table. A question asked sooner is walked and nothing
+   is kept. The number answered changes with the Compiler or its table.
+   The emitter still edits the table while it writes, and no edit of its
+   changes an answer. The walks read the defs' names, the aliases, the
+   undefs, the classes' names, the operand of each `&`, the calls named a
+   word, an attr, a by-name call, a visibility word, to_proc, inject or
+   reduce with their receiver and arguments, and, for a local handed to a
+   `&`, the kind of every node of its name. The nodes the emitter adds are
+   a StatementsNode, a `raise` call, a ConstantReadNode, a StringNode,
+   ArgumentsNodes and LocalVariableReadNodes: no def, alias, undef, class
+   or `&`, and a read or a call of a name is what a `&` parameter's name
+   may be on. The one string it writes on a node that stands is a call's
+   name, between two spellings of a builtin and back after the re-entry:
+   `===` and `==`, `<=>` and `==`, `slice` and `[]`, `[]` and `new`,
+   `find_all` and `select`, `each_grapheme_cluster` and `each_char`, and a
+   String's bang method (ty_str_typed_bang_flags) and its plain name. The
+   arguments and the block it swaps are a setter's and those of a splatted
+   universal_object_method; the receiver, a `slice!`'s. None of these is a
+   node or a name the walks read, so the table's `version`, which each such
+   edit bumps, is not asked. A new place in the emitter that adds a node or
+   writes a name is to be checked against what the walks read. */
+static int format_answers_kept(Compiler *c) {
+  static const Compiler *mc; static const NodeTable *mnt; static int gen;
+  if (!g_scopes_settled) return 0;
+  if (mc != c || mnt != c->nt) { mc = c; mnt = c->nt; gen++; }
+  return gen;
+}
+/* Can the program have a method that leaves neither a def nor an attr of
+   that name in the node table? It can by text it evaluates (the evals, the
+   execs, ERB), by an alias or an undef, by a call named one of the words,
+   and by a method run or named by a name the table does not show: an attr,
+   a by-name call, a visibility word, a to_proc, or an inject or a reduce,
+   handed a name that is not a Symbol literal or is one of those words, and
+   a `&` whose operand is not provably a block the table holds. An inject's
+   last operand is a name unless it is the only one and a literal block
+   follows: beside a `&` that holds no block when it runs, CRuby reads the
+   one operand as the name. A file the parser did not read is not asked
+   for: what it would define is not in the compiled program either. */
+static int format_uses_walk(const NodeTable *nt) {
+  int n = 0, found = 0;
+  nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+  if (n > 0) found = 1;
+  nt_nodes_of_kind(nt, NK_UndefNode, &n);
+  if (n > 0) found = 1;
+  const int *ids = nt_nodes_of_kind(nt, NK_ClassNode, &n);
+  for (int i = 0; i < n && !found; i++) {
+    int cp = nt_ref(nt, ids[i], "constant_path");
+    const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (cn && sp_streq(cn, "ERB")) found = 1;
+  }
+  const char *asked = NULL;
+  ids = nt_nodes_of_kind(nt, NK_BlockArgumentNode, &n);
+  for (int i = 0; i < n && !found; i++) {
+    int e = nt_ref(nt, ids[i], "expression");
+    const char *ln = e >= 0 && nt_kind(nt, e) == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+    if (ln && asked && sp_streq(ln, asked)) continue;
+    if (!format_block_pass_is_plain(nt, e)) found = 1;
+    asked = ln;
+  }
+  ids = nt_nodes_of_kind(nt, NK_CallNode, &n);
+  for (int i = 0; i < n && !found; i++) {
+    const char *nm = nt_str(nt, ids[i], "name");
+    if (!nm) continue;
+    if (format_is_word(nm)) { found = 1; continue; }
+    int attr = format_is_attr_call(nm), by_name = !attr && format_is_by_name(nm);
+    int vis = !attr && !by_name && format_is_visibility(nm);
+    int to_proc = sp_streq(nm, "to_proc"), fold = sp_streq(nm, "inject") || sp_streq(nm, "reduce");
+    if (!attr && !by_name && !vis && !to_proc && !fold) continue;
+    int a = nt_ref(nt, ids[i], "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    if (format_recv_is_sym_proc(nt, ids[i])) found = 1;
+    else if (to_proc) found = !format_is_plain_symbol(nt, nt_ref(nt, ids[i], "receiver"));
+    else if (by_name) found = ac > 0 && !format_is_plain_symbol(nt, av[0]);
+    else if (fold) {
+      int blk = nt_ref(nt, ids[i], "block");
+      int own_block = ac == 1 && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode;
+      found = ac > 0 && !own_block && !format_is_plain_symbol(nt, av[ac - 1]);
+    }
+    else {
+      for (int j = 0; j < ac && !found; j++) {
+        NodeKind k = nt_kind(nt, av[j]);
+        const char *an = vis && k == NK_CallNode ? nt_str(nt, av[j], "name") : NULL;
+        found = k != NK_SymbolNode && !(vis && (k == NK_DefNode || (an && format_is_attr_call(an))));
+      }
+    }
+  }
+  return found;
+}
+/* The walk is run on the table as the parser wrote it, ahead of
+   analyze_program (codegen_program), and again on the table the emitter
+   has: a desugar of the analysis may rewrite a use into nodes the walk
+   does not count (a block-pass into a block the call then holds), and one
+   may add a use. A table that was not walked as parsed is answered as
+   holding one. */
+static const NodeTable *format_parsed_nt;
+static int format_parsed_unseen;
+void format_note_parsed(Compiler *c) {
+  format_parsed_nt = c->nt;
+  format_parsed_unseen = format_uses_walk(c->nt);
+}
+static int format_prog_defines_unseen(Compiler *c) {
+  static int memo_gen, memo;
+  int g = format_answers_kept(c);
+  if (g && memo_gen == g) return memo;
+  int found = format_parsed_nt != c->nt || format_parsed_unseen || format_uses_walk(c->nt);
+  if (g) { memo_gen = g; memo = found; }
+  return found;
+}
+/* Is a call of `nm` on a builtin's value provably the builtin's own: the
+   program has no def of that name anywhere, no attr of that name, and no
+   way to define one that the node table does not show? Asked by the name
+   alone, whatever the class: a def in a subclass, a module or a singleton
+   counts. `!=` runs `==`. A reader (`reader`) is asked for a def of its name
+   only: its attr is what makes it a read. */
+static int format_name_scan(Compiler *c, const char *nm, int reader) {
+  const NodeTable *nt = c->nt;
+  if (format_prog_defines_unseen(c)) return 0;
+  const char *also = sp_streq(nm, "!=") ? "==" : nm;
+  int n = 0;
+  const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+  for (int i = 0; i < n; i++) {
+    const char *dn = nt_str(nt, defs[i], "name");
+    if (!dn || sp_streq(dn, nm) || sp_streq(dn, also)) return 0;
+  }
+  if (reader) return 1;
+  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+  for (int i = 0; i < n; i++) {
+    const char *cn = nt_str(nt, calls[i], "name");
+    if (!cn || !format_is_attr_call(cn)) continue;
+    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int j = 0; j < ac; j++) {
+      const char *sv = nt_kind(nt, av[j]) == NK_SymbolNode ? nt_str(nt, av[j], "value") : NULL;
+      if (!sv || sp_streq(sv, nm) || sp_streq(sv, also)) return 0;
+    }
+  }
+  return 1;
+}
+/* The scan's answer, kept by name while the table stands (the name is
+   copied: the emitter frees a call's name where it writes another). */
+static int format_name_answer(Compiler *c, const char *nm, int reader) {
+  static struct { char *name; char reader, answer; } *kept;
+  static int used, cap, memo_gen;
+  if (!nm) return 0;
+  int g = format_answers_kept(c);
+  if (!g) return format_name_scan(c, nm, reader);
+  if (memo_gen != g) { while (used > 0) free(kept[--used].name); memo_gen = g; }
+  for (int i = 0; i < used; i++)
+    if (kept[i].reader == reader && sp_streq(kept[i].name, nm)) return kept[i].answer;
+  int ans = format_name_scan(c, nm, reader);
+  if (used == cap) {
+    void *grown = realloc(kept, sizeof *kept * (size_t)(cap ? cap * 2 : 32));
+    if (!grown) return ans;
+    kept = grown; cap = cap ? cap * 2 : 32;
+  }
+  if ((kept[used].name = strdup(nm)) != NULL) { kept[used].reader = (char)reader; kept[used++].answer = (char)ans; }
+  return ans;
+}
+/* Is the operator's operand typed a number or a boolean? An Integer's or a
+   Float's operator hands an operand of any other class to that operand's
+   own `coerce`, or to its `==`: the program's code. */
+static int format_operand_is_scalar(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  int a = nt_ref(nt, call, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  TyKind t = ac == 1 ? comp_ntype(c, av[0]) : TY_UNKNOWN;
+  return t == TY_INT || t == TY_FLOAT || t == TY_BOOL;
+}
+static int format_name_is_builtin(Compiler *c, const char *nm) {
+  return format_name_answer(c, nm, 0);
+}
+/* Does the argument, a pure read by master's list, hold a call that is not
+   provably the builtin's? That list takes an index into a typed Array, an
+   operator on numbers or booleans and a reader's field read by the type of
+   the receiver; the program's own `[]` or `+` runs its code, and so does
+   the `coerce` of an operator's operand that is no number. A reader is
+   asked for a def of its name only: its attr is what makes it a read. */
+static int format_arg_calls_own(Compiler *c, int a) {
+  const NodeTable *nt = c->nt;
+  if (a < 0) return 0;
+  if (nt_kind(nt, a) == NK_CallNode) {
+    const char *nm = nt_str(nt, a, "name");
+    int alloc = 0;
+    if (!nm) return 1;
+    if (!format_name_answer(c, nm, call_is_field_read(c, a, &alloc))) return 1;
+    if (call_is_scalar_op(c, a) && !format_operand_is_scalar(c, a)) return 1;
+  }
+  int nr = nt_num_refs(nt, a);
+  for (int i = 0; i < nr; i++)
+    if (format_arg_calls_own(c, nt_ref_at(nt, a, i))) return 1;
+  int na = nt_num_arrs(nt, a);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, a, i, &n);
+    for (int j = 0; j < n; j++)
+      if (format_arg_calls_own(c, ids[j])) return 1;
+  }
+  return 0;
+}
+/* Is the format a String the statement makes itself, which nothing else can
+   name: a concatenation by String's own `+`, or an interpolation that is
+   provably a new String? CRuby answers the embedded String itself for an
+   interpolation whose other parts are all empty (`"#{s}#{""}"`), so one
+   counts only where a literal part that is not empty stands among its
+   parts, by the part's text as the table holds it, or where its one part
+   is embedded (`"#{s}"`). */
+static int format_is_own_made(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, v);
+  if (ty && sp_streq(ty, "InterpolatedStringNode")) {
+    int n = 0;
+    const int *parts = nt_arr(nt, v, "parts", &n);
+    for (int i = 0; i < n; i++) {
+      const char *text = nt_kind(nt, parts[i]) == NK_StringNode ? nt_str(nt, parts[i], "content") : NULL;
+      if (text && text[0]) return 1;
+    }
+    const char *pty = n == 1 ? nt_type(nt, parts[0]) : NULL;
+    return pty && sp_streq(pty, "EmbeddedStatementsNode");
+  }
+  if (nt_kind(nt, v) != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  int recv = nt_ref(nt, v, "receiver");
+  return nm && sp_streq(nm, "+") && recv >= 0 && nt_ref(nt, v, "block") < 0 &&
+         comp_ntype(c, recv) == TY_STRING && comp_ntype(c, v) == TY_STRING &&
+         format_name_is_builtin(c, "+");
+}
+/* Does building the argument run nothing that could change, in place, the
+   String a call answered as the format: a read, a literal or arithmetic on
+   numbers (subtree_is_pure_read), a global's read, or an Array literal of
+   those? An index, an operator or a reader in it counts only while it is
+   provably the builtin's (format_arg_calls_own). */
+static int format_arg_is_inert(Compiler *c, int a, int depth) {
+  const NodeTable *nt = c->nt;
+  a = unwrap_parens(c, a);
+  if (a < 0 || depth > 8) return 0;
+  const char *ty = nt_type(nt, a);
+  if (!ty) return 0;
+  if (sp_streq(ty, "StringNode") || sp_streq(ty, "GlobalVariableReadNode")) return 1;
+  if (sp_streq(ty, "ArrayNode")) {
+    int n = 0; const int *el = nt_arr(nt, a, "elements", &n);
+    for (int i = 0; i < n; i++) if (!format_arg_is_inert(c, el[i], depth + 1)) return 0;
+    return 1;
+  }
+  return subtree_is_pure_read(c, a) && !format_arg_calls_own(c, a);
+}
+/* See codegen_call_arms.h. */
+int str_format_left_alone(Compiler *c, int recv, int arg) {
+  int r = unwrap_parens(c, recv);
+  return r >= 0 && !format_ran_first(recv, r) && !format_is_held(c, r, 0) && !format_is_own_made(c, r) &&
+         !format_arg_is_inert(c, arg, 0);
+}
+/* See codegen_call_arms.h. */
+const char *emit_str_format_held(Compiler *c, int recv, int arg, int fck, Buf *b) {
+  int r = unwrap_parens(c, recv);
+  if (r < 0 || format_ran_first(recv, r) || format_is_held(c, r, 0) || str_format_left_alone(c, recv, arg)) return NULL;
+  int t = fck >= 0 ? fck : ++g_tmp;
+  buf_printf(b, "({ const char *_t%d = ", t);
+  emit_expr(c, recv, b);
+  if (fck >= 0) buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\")", t);
+  buf_printf(b, "; SP_GC_ROOT_STR(_t%d); sp_str_format_polyarr(_t%d", t, t);
+  return "); })";
+}
 /* String#% whose operand has no type yet: `[]` and a bare `Array.new`. Only
    these literal shapes are taken: emit_boxed answers nil for any other untyped
    node, which would format silently wrong, and `{}` would answer "" for `%c`.
@@ -19279,13 +19682,15 @@ int emit_str_format_untyped_array(Compiler *c, int recv, int a0n, int fck, Buf *
           sp_streq(nt_str(nt, nr, "name"), "Array") && nac == 0;
   }
   if (!lit) return 0;
-  if (fck >= 0) {
+  const char *fend = emit_str_format_held(c, recv, a0n, fck, b);
+  if (fend) {}
+  else if (fck >= 0) {
     buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
     emit_expr(c, recv, b);
     buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\"); _t%d; })", fck, fck);
   }
   else { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
-  buf_puts(b, ", sp_format_args("); emit_boxed(c, a0n, b); buf_puts(b, "))");
+  buf_puts(b, ", sp_format_args("); emit_boxed(c, a0n, b); buf_printf(b, ")%s", fend ? fend : ")");
   return 1;
 }
 void emit_call_body(Compiler *c, int id, Buf *b);

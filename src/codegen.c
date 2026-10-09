@@ -16297,6 +16297,7 @@ char *codegen_program(const NodeTable *nt) {
   size_t isa_ext_at = 0;
   Compiler *c = comp_new(nt);
   g_tmc_c = c;
+  format_note_parsed(c);   /* ahead of the analysis's desugars */
   analyze_program(c);
   if (g_dump_traits) { ty_traits_dump(c); exit(0); }
   /* --dump-repr: the analysis's answer, printed once the compile passes */

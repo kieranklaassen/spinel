@@ -379,6 +379,10 @@ extern int g_class_body_id;
    implicit self calls in included-module methods to the including class. */
 extern int g_emitting_class_id;
 extern int g_scopes_settled;   /* analysis done: scope_is_shadowed caches (codegen_util.c) */
+/* The uses by which a program can hold a method the node table does not
+   show (format_uses_walk, codegen_call.c), asked of the table as the parser
+   wrote it: called ahead of analyze_program, whose desugars may rewrite one. */
+void format_note_parsed(Compiler *c);
 /* While emitting a compile-time-unrolled define_method body: the loop-var
    name to substitute and the literal node to emit in its place (-1 = none). */
 extern const char *g_dm_subst_name;
