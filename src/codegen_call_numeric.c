@@ -227,14 +227,14 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       int tt = ++g_tmp;
       buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_bigint_round_prec(_t%d, ({ sp_int _rnd = ",
                  tt, r, tt, tt);
-      emit_int_expr(c, argv[0], b);
+      emit_ndigits(c, argv[0], float_ndigits(c, argv[0]), b);
       buf_printf(b, "; sp_int_round_check_ndigits(_rnd); _rnd; }), sp_bigint_sign(_t%d) < 0 ? 2 : 1); })", tt);
       free(rs.p); return 1;
     }
     if ((sp_streq(name, "round") || sp_streq(name, "ceil") || sp_streq(name, "floor")) && argc == 1) {
       int mode = sp_streq(name, "floor") ? 1 : sp_streq(name, "ceil") ? 2 : 0;
       /* a precision past a C int is a RangeError, as on a Fixnum (#6702) */
-      buf_printf(b, "sp_bigint_round_prec(%s, ({ sp_int _rnd = ", r); emit_int_expr(c, argv[0], b);
+      buf_printf(b, "sp_bigint_round_prec(%s, ({ sp_int _rnd = ", r); emit_ndigits(c, argv[0], float_ndigits(c, argv[0]), b);
       buf_printf(b, "; sp_int_round_check_ndigits(_rnd); _rnd; }), %d)", mode); free(rs.p); return 1;
     }
     if (sp_streq(name, "to_s") && argc == 1) {

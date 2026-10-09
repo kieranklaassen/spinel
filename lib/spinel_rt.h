@@ -4642,6 +4642,19 @@ static inline sp_int sp_float_fit_i(sp_float v) {
     sp_raise_cls("RangeError", "float out of Integer range (Bignum promotion pending)");
   return (sp_int)v;
 }
+/* A Float digit count of round, floor, ceil and truncate, read as CRuby's
+   NUM2LONG reads one: its integer part, and CRuby's RangeError for an
+   infinity, a NaN and a Float past the word. A C cast has no defined answer
+   for those: x86-64 gives the smallest Integer, arm64 the nearest end of the
+   word and 0 for a NaN, and a compiler that folds the cast gives anything. */
+static SP_UNUSED SP_NORETURN SP_COLD void sp_float_ndigits_range(sp_float d) {
+  if (isfinite(d)) sp_raise_cls("RangeError", sp_sprintf("float %.10g out of range of integer", d));
+  sp_raise_cls("RangeError", sp_sprintf("float %s out of range of integer", isnan(d) ? "NaN" : d > 0 ? "Inf" : "-Inf"));
+}
+static inline sp_int sp_float_to_ndigits(sp_float d) {
+  if (SP_UNLIKELY(!(d >= (sp_float)INTPTR_MIN && d < -(sp_float)INTPTR_MIN))) sp_float_ndigits_range(d);
+  return (sp_int)d;
+}
 /* sp_float_div_v's quotient in an sp_int slot (a typed call in the raise and
    wrap modes): one past the word is sp_float_fit_i's RangeError. The NaN a
    NaN divisor makes was cast to sp_int, which is undefined: 2.5.div(NaN)

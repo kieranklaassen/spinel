@@ -2077,6 +2077,12 @@ void emit_str_expr_sep(Compiler *c, int node, Buf *b);
 /* strict with CRuby's rb_convert_type wording ("of nil into Integer") */
 void emit_int_expr_conv(Compiler *c, int node, Buf *b);
 void emit_int_expr_offt(Compiler *c, int node, Buf *b);
+/* The digit count of round, floor, ceil and truncate: a Float count is
+   converted by sp_float_to_ndigits (see float_ndigits in codegen.c). */
+int float_ndigits(Compiler *c, int node);
+void emit_ndigits(Compiler *c, int node, int fdig, Buf *b);
+void emit_ndigits_bind(Compiler *c, int node, int fdig, int t, Buf *b);
+void emit_ndigits_use(int fdig, int t, Buf *b);
 int emit_unresolved_coerced(Compiler *c, int node, TyKind target, Buf *b);
 int emit_unresolved_coerced_text(Compiler *c, int node, TyKind target, const char *txt, Buf *b);
 int call_answers_no_value(Compiler *c, int node);

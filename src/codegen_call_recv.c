@@ -7944,7 +7944,10 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
     buf_printf(b, "({ sp_int _t%d = (%s); ", tr, r);
     if (argc == 2) {
       int tn = ++g_tmp;
-      buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
+      /* a Float count that round converts raises at the call, after the
+         keywords' values have run */
+      int fdig = sp_streq(name, "round") && float_ndigits(c, argv[0]);
+      emit_ndigits_bind(c, argv[0], fdig, tn, b);
       if (!sp_streq(name, "round")) {
         /* the hash is built before the call rejects it */
         emit_round_kw_effects(c, &kw, b);
@@ -7954,7 +7957,7 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
       }
       else {
         int tm = emit_round_kw_binds(c, &kw, b);
-        buf_printf(b, "sp_int_round_half_v(_t%d, _t%d, ", tr, tn);
+        buf_printf(b, "sp_int_round_half_v(_t%d, ", tr); emit_ndigits_use(fdig, tn, b); buf_puts(b, ", ");
         if (tm >= 0) buf_printf(b, "_t%d", tm); else buf_puts(b, "sp_box_nil()");
         buf_puts(b, "); })");
       }
@@ -7973,6 +7976,12 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
       emit_round_kw_effects(c, &kw, b);
       buf_printf(b, "_t%d; })", tr);
     }
+  }
+  else if (is_round_family(name) && argc == 1 && float_ndigits(c, argv[0])) {
+    /* a Float count may raise as it is converted: the receiver is read first */
+    int tr = ++g_tmp;
+    buf_printf(b, "({ sp_int _t%d = (%s); sp_int_%s(_t%d, ", tr, r, name, tr);
+    emit_ndigits(c, argv[0], 1, b); buf_puts(b, "); })");
   }
   else if (is_round_family(name) && argc == 1) {
     buf_printf(b, "sp_int_%s(%s, ", name, r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
@@ -8466,10 +8475,12 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
          value before the call decides anything, so they are bound in that
          order and only then read. */
       int tv = ++g_tmp, tn = -1;
+      /* a Float count raises at the call, after the keywords' values have run */
+      int fdig = eff_argc == 1 && float_ndigits(c, argv[0]);
       buf_printf(b, "({ double _t%d = (%s); ", tv, r);
       if (eff_argc == 1) {
         tn = ++g_tmp;
-        buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
+        emit_ndigits_bind(c, argv[0], fdig, tn, b);
       }
       int tm = emit_round_kw_binds(c, &kw, b);
       int pv_wide = g_promote_mode && (eff_argc == 0 ||
@@ -8494,7 +8505,7 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_printf(b, "%s(_t%d", fn, tv);
       if (!pv_wide) {
         buf_puts(b, ", ");
-        if (tn >= 0) buf_printf(b, "_t%d", tn); else buf_puts(b, "0");
+        if (tn >= 0) emit_ndigits_use(fdig, tn, b); else buf_puts(b, "0");
       }
       if (tm >= 0) buf_printf(b, ", _t%d); })", tm);
       else buf_puts(b, ", sp_box_nil()); })");
@@ -8532,8 +8543,15 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         /* The class depends on the runtime ndigits: Float when n > 0, Integer
            when n <= 0 (CRuby). Choose at runtime and return a boxed poly. */
         int tn = ++g_tmp, tv = ++g_tmp;
-        buf_printf(b, "({ sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b);
-        buf_printf(b, "; double _t%d = (%s); (_t%d > 0)", tv, r, tn);
+        /* a Float count is converted once the receiver has been read */
+        int fdig = float_ndigits(c, argv[0]);
+        buf_puts(b, "({ "); emit_ndigits_bind(c, argv[0], fdig, tn, b);
+        buf_printf(b, "double _t%d = (%s); ", tv, r);
+        if (fdig) {
+          int tf = tn; tn = ++g_tmp;
+          buf_printf(b, "sp_int _t%d = sp_float_to_ndigits(_t%d); ", tn, tf);
+        }
+        buf_printf(b, "(_t%d > 0)", tn);
         buf_printf(b, " ? sp_box_float(sp_float_prec_op(_t%d, _t%d, %s))", tv, tn, precop);
         buf_printf(b, " : ({ if (isinf(_t%d)) sp_raise_cls(\"FloatDomainError\", _t%d > 0 ? \"Infinity\" : \"-Infinity\");"
                       " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
@@ -14205,11 +14223,12 @@ static int emit_poly_numeric_call(Compiler *c, int id, Buf *b, const NodeTable *
       int tv = ++g_tmp;
       buf_puts(b, "({ "); tv = hold_operand(c, recv, TY_POLY, 0, tv, 1, " ", b);
       int tn = -1;
+      /* a Float count that round converts raises at the call, after the
+         keywords' values have run */
+      int fdig = argc == 2 && sp_streq(name, "round") && float_ndigits(c, argv[0]);
       if (argc == 2) {
         tn = ++g_tmp;
-        buf_printf(b, "sp_int _t%d = ", tn);
-        emit_int_expr(c, argv[0], b);
-        buf_puts(b, "; ");
+        emit_ndigits_bind(c, argv[0], fdig, tn, b);
       }
       /* only #round takes a tie-break mode; the other three reject a keyword
          outright, with CRuby's words (the typed arm does the same, #3646).
@@ -14239,7 +14258,7 @@ static int emit_poly_numeric_call(Compiler *c, int id, Buf *b, const NodeTable *
          Symbol, a String, nil for the default -- deciding which is the
          helper's job, since only it knows whether the receiver cares */
       buf_printf(b, "sp_poly_round_half(_t%d, ", tv);
-      if (tn >= 0) buf_printf(b, "_t%d", tn); else buf_puts(b, "0");
+      if (tn >= 0) emit_ndigits_use(fdig, tn, b); else buf_puts(b, "0");
       if (thalf >= 0) buf_printf(b, ", _t%d); })", thalf);
       else buf_puts(b, ", sp_box_nil()); })");
       { *out = 1; return 1; }
@@ -14251,13 +14270,17 @@ static int emit_poly_numeric_call(Compiler *c, int id, Buf *b, const NodeTable *
     if (!poly_name_user_claimed(c, name, argc)) {
       /* ceil / floor / truncate with a precision had no arm at all and
          raised NoMethodError on a Float (#4532) */
+      /* a Float count may raise as it is converted: the receiver is held first */
+      int fdig = float_ndigits(c, argv[0]), tv = -1;
+      if (fdig) { tv = ++g_tmp; buf_puts(b, "({ "); tv = hold_operand(c, recv, TY_POLY, 0, tv, 1, " ", b); }
       if (sp_streq(name, "round")) buf_puts(b, "sp_poly_round_n(");
       else buf_puts(b, "sp_poly_prec_n(");
-      emit_expr(c, recv, b); buf_puts(b, ", ");
-      emit_int_expr(c, argv[0], b);
+      if (fdig) buf_printf(b, "_t%d", tv); else emit_expr(c, recv, b);
+      buf_puts(b, ", ");
+      emit_ndigits(c, argv[0], fdig, b);
       if (!sp_streq(name, "round"))
         buf_printf(b, ", %s", name[0] == 'c' ? "SP_PREC_CEIL" : name[0] == 'f' ? "SP_PREC_FLOOR" : "SP_PREC_TRUNC");
-      buf_puts(b, ")");
+      buf_puts(b, fdig ? "); })" : ")");
       { *out = 1; return 1; }
     }
   }

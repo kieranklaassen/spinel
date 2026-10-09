@@ -897,6 +897,47 @@ void emit_int_expr_offt(Compiler *c, int node, Buf *b) {
   emit_int_expr_ex(c, node, 3, b);
 }
 
+/* Is `node`, as the digit count of round, floor, ceil or truncate, a Float
+   that emit_int_expr casts to the word, `(sp_int)(X)`? That cast is undefined
+   in C for an infinity, a NaN and a Float past the word: x86-64 answers the
+   smallest Integer, arm64 the nearest end of the word and 0 for a NaN. Such
+   a count is handed to sp_float_to_ndigits instead, which reads it as CRuby's
+   NUM2LONG does. A literal a 32-bit word holds is cast rightly, and anything
+   emit_int_expr writes another way (a splat, a boxed value, a Bignum) is not
+   a cast: those stay its text. */
+int float_ndigits(Compiler *c, int node) {
+  if (comp_ntype(c, node) != TY_FLOAT) return 0;
+  const char *nty = nt_type(c->nt, node);
+  if (nty && sp_streq(nty, "FloatNode")) {
+    const char *v = nt_content(c->nt, node);
+    char *end = NULL;
+    double d = v ? strtod(v, &end) : 0.0;
+    if (v && end != v && !*end && d > -2.0e9 && d < 2.0e9) return 0;
+  }
+  return !(nty && sp_streq(nty, "SplatNode")) && yield_site_type(c, node) != TY_POLY && !repr_of(c, node).big;
+}
+
+/* The digit count where it is converted as it is read: emit_int_expr's text,
+   or the checked conversion of a Float count (`fdig`, float_ndigits' answer). */
+void emit_ndigits(Compiler *c, int node, int fdig, Buf *b) {
+  if (!fdig) { emit_int_expr(c, node, b); return; }
+  buf_puts(b, "sp_float_to_ndigits("); emit_scalar_operand(c, node, "0", b); buf_puts(b, ")");
+}
+
+/* The digit count bound to _t<t> ahead of operands that run after it. A Float
+   count is bound as the Float it is and converted where it is used
+   (emit_ndigits_use), so its RangeError comes after those operands have run,
+   as CRuby's does. */
+void emit_ndigits_bind(Compiler *c, int node, int fdig, int t, Buf *b) {
+  buf_printf(b, "%s _t%d = ", fdig ? "sp_float" : "sp_int", t);
+  if (fdig) emit_scalar_operand(c, node, "0", b); else emit_int_expr(c, node, b);
+  buf_puts(b, "; ");
+}
+
+void emit_ndigits_use(int fdig, int t, Buf *b) {
+  buf_printf(b, fdig ? "sp_float_to_ndigits(_t%d)" : "_t%d", t);
+}
+
 /* Emit a node as an sp_float. A poly value is unboxed via sp_poly_to_f; a
    numeric value is plain-cast, matching the legacy `(sp_float)(...)`. The
    slot follows CRuby's rb_to_float, which converts only a Numeric: a String,
