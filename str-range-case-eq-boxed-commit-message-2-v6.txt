@@ -1,0 +1,48 @@
+when with a String Range takes a boxed String subject
+
+    def band(v)
+      case v
+      when "a".."m" then "low"
+      when "n".."z" then "high"
+      when 1..9 then "digit"
+      else "other"
+      end
+    end
+    puts band("c"), band("q"), band(5), band(nil)
+
+printed `other`, `other`, `digit`, `other`; CRuby prints `low`, `high`,
+`digit`, `other`.
+
+v is boxed: it is given a String, an Integer and nil.
+emit_when_typed_test has an arm for a String subject against a String
+Range, and for a boxed subject against an Integer or a Float Range, and
+none for a boxed subject against a String Range. The when fell to the
+equality of the subject and the boxed Range, which no String satisfies.
+
+The arm is added. A plain String is compared where the arm is written,
+by its bytes and length. A boxed object is asked out of line
+(sp_srange_when_obj): a shared String handle is covered by its text; an
+object of one of the program's classes is asked whether it equals the
+Range, as it was; any other takes no arm. So a boxed
+String Range equal to the arm's, which took the arm, no longer does, as
+in CRuby.
+
+Master's C stays where `===` of the Range keeps it (the commit before):
+a program that has or may have a ===, a <=>, an ==, a succ or an `each`
+of its own, in any class, and one where it is not said what a box
+tagged as a handle holds.
+
+Cost (callgrind, 300,000 turns, gcc 13.3 and clang 18.1). The Range is
+made only when the arm is reached, and it is not boxed. Reached by an
+Integer, a case runs 228 and 207 instructions fewer; by a String
+outside the Range, 51 and 50 fewer. An arm that is not reached, behind
+a `when 1` the subject takes: a turn of two such cases runs 1
+instruction more with gcc and none more with clang, with a handle in
+the program or without (2 more with clang where the case runs in a
+block). The arm adds nothing to that path; the C compiler keeps the
+subject in other registers ahead of it.
+
+Test: test/case_when_str_range_boxed.rb (expected from CRuby 3.3.6),
+run under GC stress by its header line.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

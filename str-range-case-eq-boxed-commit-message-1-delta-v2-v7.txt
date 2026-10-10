@@ -1,0 +1,56 @@
+--- message 1 v2
++++ message 1 v7
+@@ -26,14 +26,35 @@
+ equal to the receiver was `true` and is `false`, as in CRuby, where a
+ Range is no member of itself.
+ 
+-Master's C stays in a program with a Range#=== of its own, or its own
+-String#<=>, #== or #succ (this call does not ask them, before or
+-after), and in one whose box may hold a plain String under the handle's
+-tag (program_strbuf_boxes, the commit beneath).
++Master's C stays where cover? of the Range keeps it (the commit
++beneath): in a program that has, or may have, a ===, a <=>, an == or a
++succ of its own, in any class (this call does not ask them, before or
++after), and in one where that commit does not say what a box tagged as
++a handle holds: it stores the String of a method call the scan does
++not follow.
++
++It stays as well in a program that may have an `each` of its own
++(an_prog_never_gives, the walk the commit beneath asks: a def of that
++name anywhere, the Symbol :each, or a site where a method is named,
++made, mixed in or loaded by something the text does not spell; a
++package's Ruby is the program's text to it, so a program that requires
++set or csv stays too). grep and grep_v ask this `===` of each element,
++and over an Array they walk as the builtin does where CRuby walks by
++the `each` the program gave it:
++
++    class Array
++      def each
++        self
++      end
++    end
++    p ["c", 5, "q", nil].grep("a".."m")
++
++prints `[]` in CRuby and on master, which finds no String for another
++reason, and would print `["c"]` with the arm.
+ 
+ Cost: none on a program master answered right. The Range is no longer
+ boxed for the question: 300,000 turns of `n += 1 if r === x` run
+-238 and 207 instructions a turn fewer for an Integer x, and 63 and 55
++237 and 208 instructions a turn fewer for an Integer x, and 86 and 56
+ fewer for a String outside the Range (callgrind, gcc 13.3 and clang
+ 18.1).
+ 
+@@ -42,7 +63,10 @@
+ and none? of a String Array with a String Range answer as if no element
+ matched.
+ 
+-Test: test/str_range_case_eq_boxed.rb (expected from CRuby 3.3.6),
+-added to GC_STRESS_TESTS.
++Test: test/str_range_case_eq_boxed.rb (expected from CRuby 3.3.6), run
++under GC stress by its header line. Three programs with an `each` of
++their own on Array, each right on master and kept:
++test/str_range_grep_own_each.rb, _defined.rb (define_method),
++_prepended.rb (a prepended module).
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
