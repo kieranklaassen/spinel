@@ -1,0 +1,26 @@
+The format piece's commit message, v8 to v9: every changed line, OLD and NEW.
+
+OLD:
+interpolation counts as one only where it is provably a new String:
+a literal part that is not empty stands among its parts, or its one
+part is embedded (`"#{s}"`). CRuby answers the embedded String
+itself for one whose other parts are all empty (`"#{s}#{""}"`), and
+such a format keeps the C it had.
+
+NEW:
+interpolation counts as one only where it has a part to evaluate and
+is provably a new String: a literal part that is not empty stands
+among its parts, or its one part is embedded (`"#{s}"`). CRuby
+answers the embedded String itself for one whose other parts are all
+empty (`"#{s}#{""}"`), and such a format keeps the C it had.
+
+----
+
+OLD:
+between two of those (`c ? f : g`, `f || g`). A slot read counts
+
+NEW:
+between two of those (`c ? f : g`, `f || g`). An interpolation of
+literal parts alone (`"%d " "%d|"`, a squiggly heredoc whose lines
+indent differently) is a literal too: emit_interp folds it into one,
+and interp_is_literal_fold says which they are. A slot read counts

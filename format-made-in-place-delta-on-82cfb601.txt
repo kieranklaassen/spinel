@@ -1,0 +1,70 @@
+Delta for the reader: the format piece on master 82cfb601d, with the fold cut.
+
+fffcc8f5fb27 (one commit on f85f04b3abef; body -v12, message -v8; read NOT READY on one point: a cost on a right program) is superseded and stays pushed. The new head is cd6a07dd35b62c58fd5ee13b9d9be77fd861e35c, tree 6e5e0a1dcbc8dcff199acbf4c4b0473e16708fc2, one commit on master 82cfb601d688e70b24f7f6b98aacc104245a90ef, the tip by my own ls-remote when it was cut (22:49 UTC, 10-09). Texts: body -v13, message -v9, an OLD/NEW file for each (against -v12 and -v8). The title, the test and its .expected are as they were (the same blobs).
+
+THE CODE. One line and its comment, in format_is_held (src/codegen_call.c). The whole delta against fffcc8f5fb27 replayed on the same tip (a clean merge, tree 910079dbde5b):
+
+--- a/src/codegen_call.c
++++ b/src/codegen_call.c
+@@ -20274,14 +20274,18 @@ static int format_is_slot_read(Compiler *c, int v) {
+ /* Does something else hold the format while the arguments are built? A
+    literal and a read that cannot allocate do, so does a read out of a slot
+    (format_is_slot_read), and so does a choice between two of those
+-   (`c ? F : rows[0]`, `t || F`). Anything else is a String made where it is
+-   written: an interpolation, a copy of a shared String, a call's answer. */
++   (`c ? F : rows[0]`, `t || F`). An interpolation of literal parts alone
++   (`"%d " "%d|"`, a squiggly heredoc of mixed indents) is a literal too:
++   emit_interp folds it into one (interp_is_literal_fold). Anything else is
++   a String made where it is written: an interpolation, a copy of a shared
++   String, a call's answer. */
+ static int format_is_held(Compiler *c, int v, int depth) {
+   const NodeTable *nt = c->nt;
+   v = unwrap_parens(c, v);
+   if (v < 0 || depth > 8) return 0;
+   NodeKind k = nt_kind(nt, v);
+   if (k == NK_StringNode || !operand_may_allocate(c, v)) return 1;
++  if (k == NK_InterpolatedStringNode && interp_is_literal_fold(nt, v)) return 1;
+   if (k == NK_IfNode) {
+     int arm[2] = { nt_ref(nt, v, "statements"), nt_ref(nt, v, "subsequent") };
+     if (arm[1] < 0 || nt_kind(nt, arm[1]) != NK_ElseNode) return 0;
+
+How to read it. Your find: a format that is an interpolation of literal parts alone (`"%d " "%d|"`, a squiggly heredoc whose lines indent differently) was taken by format_is_own_made as a String made here and rooted, though master folds it into one static literal. The line asks master's own interp_is_literal_fold ahead of everything else, so such a format is held, as a StringNode is, wherever a format is asked: at the top, as one side of a choice, as one side of an `||`. format_is_own_made is not changed: it is reached only after format_is_held has said no.
+
+THE INVERTED TEST: what the line releases is master's C, and nothing else moves.
+- This head against the plain replay, by the generated C: the corpus, 6,809 programs: 0 differ. 815 probe programs: 777 equal, 20 build on neither, 18 differ, and those are the sixteen fold probes and the two cost programs (yours: adjacent literals and the heredoc, 200,000 statements each).
+- The released statements against the bare tip: eleven of the sixteen and both cost programs are the bare tip's C byte for byte. The other five have an argument the piece acts on whatever the format is: a String made in place (r10 `"%5s" "|" % mk(i)`, r12 `"%5s" "|" % ("q" + i.to_s)`, r14 the heredoc beside `mk(i)`) and a call's Float or Integer (r15, r16). Thirteen of the sixteen were also written with one literal in place of the parts: fold and one-literal are the same C in all thirteen on the bare tip, and in all thirteen on this head. So a released statement is the C of the same statement with a literal format, which is master's C where the argument is not one of those.
+- A part that is not a literal keeps the format held ahead: eight probes (`"%#{w}d " "%d|"`, a heredoc with an embedded part, a plain interpolation, an embedded part alone, a concatenation, an embedded literal part `"#{"%d"} %d|"`) are the plain replay's C, differ from the bare tip's, and are right in every cell here where the bare tip prints poison bytes, is stopped, or (gcc, the width written by the argument) prints another line.
+- The cost that is cut (callgrind, 200,000 statements; the bare tip | the plain replay | this head):
+  `"%d " "%d|" % ints`: gcc 415,435,307 | 419,839,765 (+22.0 a statement) | 415,435,321; clang 406,903,221 | 410,107,589 (+16.0 a statement) | 406,903,207
+  the heredoc of two indents: gcc 430,520,522 | 434,924,756 (+22.0 a statement) | 430,520,508; clang 420,182,826 | 423,386,970 (+16.0 a statement) | 420,182,840
+- By answer, gcc and clang at levels 0, 1 and 2: the sixteen are right in every cell on this head, plain and with --share-strings (the bare tip is stopped at level 2 on r10, r12 and r14: the argument's String, which the piece roots).
+
+WHAT THE LINE READS. interp_is_literal_fold reads interp_flatten and the node kinds, nothing else. interp_plan (changed at the tip's line 324) is read by neither format_is_held nor interp_is_literal_fold; the change there is inside the arm for an embedded part (a Class part's conversion name) and does not touch the count emit_interp folds on. proc_arg_ty is not read by the piece or by anything its proof reads. emit_boxed's change in that range (a String safe-navigation to_s; a lifted strbuf handle argument) does not touch the Integer and Float boxing text boxed_number_value parses.
+
+THE BASE MOVED UNDER THE TEXTS (f85f04b3a to 82cfb601d). Every example and every number of body and message was run again on the bare tip. What the run changed in the body: the base's name and the corpus count (6,809 other programs, the same seven changed); the compiler's own instructions; the hold of a constant changed in place with --share-strings, 13 instructions a statement with gcc as before and 19 with clang (was 26); the proof's example `held % (f + 1.0)` now says what level 2 does (stopped by the collector's own check with both compilers, on master and here, the same C). What it confirmed as written: the lead example and the interpolation (gcc raises, clang seven poison bytes; clang poison); the three tests of the tree that are wrong at level 2; the 112 statements, figure for figure (40 and 40, 53 with one or the other; 105 and 108 right here, the seven left with master's C); the fifteen, the thirty and the four, the eleven; every "Not in this change" bullet; the test on master (gcc four other lines in a plain run; stopped after its sixth line at level 2 with both, clang's first three and sixth poison). The cost table is the one measured on 74fa6d7c2 and is not run again, as the body says.
+
+NO CELL LOST, NO RAISE MADE A WRONG LINE. 515 probe programs plain and 31 with --share-strings, the bare tip against this head, gcc and clang at levels 0, 1 and 2: by the statement, no cell that is right on the tip is lost and no raise or stop becomes a wrong line. The two cases to name are the ones on record:
+- u04_own_made_format: a `def` in a RUBY_ENGINE arm the compiler drops; the tip's gcc line equals CRuby's only because CRuby runs the dropped arm. The body's "Not in this change" has it.
+- i03, i05 and i06, programs of several statements, are stopped at their first statement on the bare tip at level 2 and run on here to later statements master answers wrong in a plain run too. Split by the statement (ten programs): no raise becomes a wrong line, no cell is lost.
+
+COMPILE TIME (callgrind, the compiler's own instructions with -c; the bare tip | this head):
+  p held % (ar[k] + i * m), 1,000 lines:                4,433,989,495 |  4,433,757,872 (-0.01%)
+  the same, 2,000:                                      8,873,756,262 |  8,873,248,766 (-0.01%)
+  p held % (o.a_rather_long_reader + i), 1,000:         3,457,821,922 |  3,458,134,670 (+0.01%)
+  the same, 2,000:                                      6,915,692,202 |  6,916,317,862 (+0.01%)
+  p "%5d|" % (o.a_rather_long_reader + i), 1,000:       3,097,488,167 |  3,120,040,579 (+0.73%)
+  the same, 2,000:                                      6,193,841,552 |  6,238,943,776 (+0.73%)
+  p "%5d|" % o.a_rather_long_reader, 1,000:             1,268,376,158 |  1,289,577,895 (+1.67%)
+  the same, 2,000:                                      2,532,533,332 |  2,574,942,204 (+1.67%)
+  the test: 91,067,496 | 91,383,120
+The first four keep master's C. Two runs of one binary on one file differ by up to 0.03% here, so -0.01% and +0.01% are none. The last four are the walk the body names (master's subtree_is_pure_read, asked once more).
+
+OWN CHECKS on this head, built from nothing, against the bare tip 82cfb601d688 built from nothing
+- `ruby tools/gate.rb check`, the commit staged: exit 0;
+- the test, seven lanes, gcc and clang, plain and --share-strings: right in every one here; the bare tip: gcc rc0/rc0/rc0/rc134/rc0/rc0/rc0, clang ok/ok/ok/rc134/ok/ok/ok;
+- corpus: 6,809 programs, the C of 10 differs from the bare tip's: the seven of the body and three that print the path of the build's own directory (in that alone). Lanes of the seven: poly_string_dup_unfrozen and benchmark_tms, clang level 2 wrong on the tip and right here; string_format_scalar_operands raises on the tip at level 2 with both and is right here; the other four as they were (promote_yield_operator_diverging_block_types exits 1 in every lane on both);
+- optcarrot: checksum 59662, C byte-identical;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- the proof is asked twice under test/, benchmark/ and packages/*/test/ (the two yield_operator_diverging_block_types tests), and shown both times.
+
+MASTER'S MOVE SINCE. The tip by my own ls-remote at 00:38 UTC, 10-10: 2b0ebc0a6bfd513ea869fc48eeb0bfce0c03aa66. From 82cfb601d688 to it the move touches no function of the piece (the `%` arms, emit_str_format_held, format_is_held, format_is_own_made, format_arg_is_inert, format_name_is_builtin, str_format_left_alone and the rest) and none its proof reads (operand_may_allocate, subtree_is_pure_read, arg_ran_first, an_prog_never_gives, emit_boxed, emit_expr, emit_operands_in_order, interp_is_literal_fold, interp_flatten, emit_interp, interp_plan); the merge into it: exit status 0, tree dff1df2b0c12ab530c9ffe174a4e83adea1c12b7. So the head stands on 82cfb601d688 by the rule. A short round on the merge into the tip before that one, 098f50389d2b (the tip at 00:20 UTC; exit status 0, tree a922ddd68361), both sides built from nothing: the test is right in its 28 lanes on the merge and as above on that bare tip; 129 probe programs by answer, plain (the sixteen and the eight, the lead examples, the fifteen, the thirty and the four, the eleven), gcc and clang at levels 0, 1 and 2: no cell lost, no raise made a wrong line.
