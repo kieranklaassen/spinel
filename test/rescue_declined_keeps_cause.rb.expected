@@ -1,0 +1,27 @@
+d1: TypeError d1, cause nil
+d2 ensure: nil
+d2: TypeError d2, cause nil
+d3 inner
+d3 ensure: nil
+d3: TypeError d3, cause nil
+d4: TypeError d4, cause #<ArgumentError: other>
+d5: TypeError d5, cause nil
+d6 ensure: nil
+d6: Wrapped d6, cause nil
+d7 ensure: nil
+d7: TypeError d7, cause nil
+d8 ensure: nil
+d8: TypeError d8, cause nil
+d9: NotImplementedError d9, cause nil
+d10: NotImplementedError d10, cause nil
+d11 inner
+d11 ensure: KeyError nil
+d11: first, cause nil; second's cause #<KeyError: first>
+d11: nothing raised
+e1 ensure: #<KeyError: low>
+e1: TypeError e1, cause #<KeyError: low>
+e2: Wrapped e2, cause #<KeyError: low>
+e4: TypeError e4, cause nil
+e5 ensure: #<KeyError: low>
+e5: Wrapped e5, cause #<KeyError: low>
+e6: TypeError e6, cause nil

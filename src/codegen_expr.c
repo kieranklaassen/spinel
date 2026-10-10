@@ -3956,7 +3956,7 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
                    this arm caught everything, so a subclass of Exception was
                    swallowed (#3725) */
                 "if (!sp_exc_is_standard_error((const char *)sp_last_exc_cls)) {\n    "
-                "  sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1;\n    "
+                "  sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1; sp_reraise_continues = 1;\n    "
                 "  sp_raise_cls((const char *)sp_last_exc_cls, sp_exc_msg[sp_exc_top]);\n  "
                 "}\n  ");
     /* materialize the handled exception and push it so `$!` (and #cause
