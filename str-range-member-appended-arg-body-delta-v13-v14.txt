@@ -1,0 +1,32 @@
+--- body v13, on the handoff
++++ body v14
+@@ -23,7 +23,7 @@
+ 
+ "May have" is asked of two tables. A `def` in the builtin's class is in the class table. The rest is `an_prog_never_gives`, the analysis's walk of the program as written (src/analyze.c). It reads the program ahead of every rewrite and of the arm a test of the engine drops: no `def` and no Symbol of the name anywhere, and no site where a method is named, made, mixed in or loaded by something the text does not spell. So `alias <=> index`, `def lo.<=>`, a `String.define_method(:<=>) { }` under a `rescue`, a `send(name)`, an `eval` and a file the compiler did not read leave master's C. So does `class String; prepend Kernel; end`: Kernel's `<=>` answers nil for two Strings that differ, and no text of the program's holds it.
+ 
+-The names asked are the ones CRuby asks on these calls: the call's own on Range (`cover?`, `include?`, `member?`; `===` for the change above this one) and `<=>`, `==` and `succ` on String, seven in all; `eql?` is not one. The walk does not ask where a `def` lands, so a `def ==` in a class of the program's own leaves master's C too, and so does the Symbol `:==` written anywhere: the three calls answer `false` there, as on master. Of the 6,778 programs of test/, benchmark/ and the packages' tests the two tables answer "may" for 1,229, for 1,135 of them by a site. A package is the program's text to the walk: each of the nine tried (set, csv, uri, bigdecimal, pathname, stringio, json, strscan and Gem::Version) leaves master's C.
++The names asked are the ones CRuby asks on these calls: the call's own on Range (`cover?`, `include?`, `member?`; `===` for the change above this one) and `<=>`, `==` and `succ` on String, seven in all; `eql?` is not one. The walk does not ask where a `def` lands, so a `def ==` in a class of the program's own leaves master's C too, and so does the Symbol `:==` written anywhere: the three calls answer `false` there, as on master. Of the 6,824 programs of test/, benchmark/ and the packages' tests the two tables answer "may" for 1,238, for 1,144 of them by a site. A package is the program's text to the walk: each of the nine tried (set, csv, uri, bigdecimal, pathname, stringio, json, strscan and Gem::Version) leaves master's C.
+ 
+ Cost in instructions a call, gcc 13.3 / clang 18.1, callgrind over 300,000 turns of `n += 1 if r.cover?(x)`, in a `while` loop and in a `300000.times` block, with `r = ("aa".."az")` and `x` read once from `["ab", 1]`. "With a handle" puts `hh = {"k" => "x".dup, "n" => 1}; hh["k"] << "y"` above the loop.
+ 
+@@ -34,9 +34,9 @@
+ | `cover?`, an Integer | 0 / 0 | +6 / +4 | +6 / +4 |
+ | `include?`, a String (`"aa".."ad"`) | 0 / 0 | +3 / +1 | +4 / +1 |
+ 
+-Compiling such a call runs 32,000 to 32,100 more instructions, 2.3% over 1,000 of them and over 2,000 (callgrind over `spinel -c --no-line-map`, the compiler alone, against master: 1,441,815,125 for 1,409,699,045 and 2,878,504,553 for 2,814,525,296): the arm, and in it 920 a call for the eight questions, each a lookup in a table the analysis built. A program without such a call does not ask: compiling optcarrot runs 8,267,124,714 instructions for 8,266,868,983, the walk for handles, and its C is the same.
++Compiling such a call runs 31,100 to 32,000 more instructions, 2.2% over 1,000 of them, 2.3% over 2,000 (callgrind over `spinel -c --no-line-map`, the compiler alone, against master: 1,446,707,095 for 1,415,569,541 and 2,887,871,144 for 2,823,899,830): the arm, and in it 920 a call for the eight questions, each a lookup in a table the analysis built. A program without such a call does not ask: compiling optcarrot runs 8,283,902,539 instructions for 8,283,643,098, the walk for handles, and its C is the same.
+ 
+-`make cident` against master: the C of 6777 programs is identical and of 1 differs, this change's test. With `--share-strings` 6776 are identical, the same 1 differs, and both builds refuse 1, test/string_plain_mutator_result_kept.rb (named in test/share/known-failures.txt).
++`make cident` against master: the C of 6823 programs is identical and of 1 differs, this change's test. With `--share-strings` 6822 are identical, the same 1 differs, and both builds refuse 1, test/string_plain_mutator_result_kept.rb (named in test/share/known-failures.txt).
+ 
+ Not here: a program that has or may have a method named `cover?`, `include?`, `member?`, `<=>`, `==` or `succ` of its own, in any class and by any road, is left as master has it, and that takes in a program that mixes in a module, its own too, and one that requires a package: of the nine tried, set, csv, uri, bigdecimal and pathname by their own Ruby, which the walk reads as the program's text, and stringio, json, strscan and `Gem::Version` because the compiler does not prove it read every file; a String stored from a method call the scan does not follow (`{"k" => box.text}` beside an appended String, without `--share-strings`) still answers `false`, since that program keeps master's C, and so does one stored from a reader called without a receiver (`{"k" => name}` in a method of its class, with `--share-strings`); `cover?` of a plain String still compares up to its first NUL; a String Range the call does not see as typed (read out of an Array or a Hash, or a "Range or nil" local called with `&.`) and `r.method(:cover?).call(x)` still answer false for the handle; `===` and `case`/`when` of a String Range with a boxed value are their own change.
+ 
+@@ -46,7 +46,7 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that, on this commit over master `090969e7759b` (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the fourteen tests at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check`, `make gc-stress-test`, `make int-min-test`, `make cident` against master, and the figures above, call counts and compile counts alike.
++Run here before that, on this commit over master `4689b503c791` (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the thirteen tests at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check`, `make gc-stress-test`, `make share-strings-test`, `make int-min-test`, `make cident` against master, and the figures above, call counts and compile counts alike.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)

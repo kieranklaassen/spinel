@@ -1,0 +1,35 @@
+--- message v12, on the handoff
++++ message v13
+@@ -62,12 +62,12 @@
+ a while loop: 4 and 2 a call for a plain String held in a local, 6 and
+ 2 for one read from an Array each turn, 6 and 4 for an Integer, 3 and 1
+ for include? of a plain String. In a block: 5 and 2, 8 and 2, 6 and 4,
+-4 and 1. Compiling such a call runs 32,000 to 32,100 more instructions
+-(callgrind over `spinel -c`: 2.3% over 1,000 of them and over 2,000):
++4 and 1. Compiling such a call runs 31,100 to 32,000 more instructions
++(callgrind over `spinel -c`: 2.2% over 1,000 of them, 2.3% over 2,000):
+ the arm, and in it 920 a call for the eight questions, each a lookup in
+ a table the analysis built. A program with no such call does not ask.
+ The walk for handles looks at the call nodes stored as a handle:
+-compiling optcarrot runs 8,267,124,714 instructions for 8,266,868,983,
++compiling optcarrot runs 8,283,902,539 instructions for 8,283,643,098,
+ and its C is byte for byte the same.
+ 
+ Not here. A String stored from a method call the scan does not follow
+@@ -83,12 +83,11 @@
+ 
+ Test: test/str_range_member_boxed_handle.rb (expected from CRuby
+ 3.3.6), run under GC stress by its header line: its last block makes
+-both ends of its Range where it is written. Thirteen programs with a
++both ends of its Range where it is written. Twelve programs with a
+ <=> ahead of String's own that the class table does not hold, each
+ right on master and kept: test/str_range_cover_own_compare_alias.rb,
+-_computed.rb, _rescued.rb, _singleton.rb, _prepend_in_method.rb,
+-_module_prepends.rb, _dropped_block.rb, _inject.rb, _erb.rb,
+-_inject_block.rb, _own_lambda.rb, _engine_arm.rb and
+-_prepend_kernel.rb.
++_rescued.rb, _singleton.rb, _prepend_in_method.rb, _module_prepends.rb,
++_dropped_block.rb, _inject.rb, _erb.rb, _inject_block.rb,
++_own_lambda.rb, _engine_arm.rb and _prepend_kernel.rb.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
