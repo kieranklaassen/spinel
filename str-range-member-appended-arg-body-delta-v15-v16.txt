@@ -1,0 +1,10 @@
+--- body v15
++++ body v16
+@@ -49,6 +49,6 @@
+ Run here before that, on this commit over master `da597297426d` (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the twenty-nine tests at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check`, `make gc-stress-test`, `make share-strings-test`, `make int-min-test`, `make cident` against master, and the figures above, call counts and compile counts alike.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+-- [x] Values past 2^31 are marked `# spinel: int64` (none: no Integer of a test passes it; three of the tests hold longer digit runs as the text of Strings, which `tools/gate.rb check` notes and does not fail)
++- [x] Values past 2^31 are marked `# spinel: int64` (none: no Integer of a test passes it; three of the tests hold longer digit runs as the text of Strings, which `tools/gate.rb check` notes and does not fail; the tests were not run with a 32-bit Integer here)
+ - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+ - [x] Depends on: nothing (pull requests 8114 and 8168, which it stood on, are merged)
