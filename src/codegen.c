@@ -16773,6 +16773,8 @@ char *codegen_program(const NodeTable *nt) {
      emissions are gated on them (a `puts "hello"` program gets none). */
   g_needs_class_machinery = program_needs_class_machinery(c);
   scan_prologue_features(c);
+  /* asked here, before an expression's views move a mark */
+  g_strbuf_boxes = program_strbuf_boxes(c);
   refuse_syserr_errno_const(c);
 
   /* Analyze-only emit modes (legacy --emit-*): write the requested artifact
