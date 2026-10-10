@@ -11356,11 +11356,84 @@ int desugar_enum_pair_lone_param(Compiler *c) {
    Its to_a is the chunks themselves, so a block over it binds each chunk
    as the one value it is (`runs.map { |*r| r }` is [[chunk]], `&:sum`
    sums the chunk). */
-static int one_value_enum_source(const NodeTable *nt, int hop) {
+/* The iterators and block shapes over which a method of the program's own
+   by one of those names is read as its own: each pair here is one master
+   answers as CRuby does over such a method under any other name, whatever
+   Enumerator it returns. Over any other the name keeps the builtin's
+   reading, and some programs are right only by it. So each is not here:
+   each_entry comes as each (analyze.c renames it), and it packs the values
+   of a step where each spreads them. Nor is uniq with a lone |*r|, which
+   keeps an Array around a String the Enumerator made, nor &:m, which
+   hands m the second value of a step and no third, nor a block of
+   numbered parameters, which is not asked. A lone parameter that takes its
+   value apart (`|(a, b)|`) is a lone |x| here, and block-locals (`|x; y|`)
+   leave the shape as it is. */
+static int own_enum_hop_proven(const NodeTable *nt, const char *nm, int blk) {
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+  int bp = nt_ref(nt, blk, "parameters");
+  int pn = bp >= 0 && nt_kind(nt, bp) == NK_BlockParametersNode ? nt_ref(nt, bp, "parameters") : -1;
+  if (pn < 0) return 0;
+  int P = 0, O = 0, Q = 0, kn = 0;
+  const int *pre = nt_arr(nt, pn, "requireds", &P);
+  nt_arr(nt, pn, "optionals", &O); nt_arr(nt, pn, "posts", &Q); nt_arr(nt, pn, "keywords", &kn);
+  int rest = nt_ref(nt, pn, "rest");
+  if (O || Q || kn || nt_ref(nt, pn, "keyword_rest") >= 0 || nt_ref(nt, pn, "block") >= 0) return 0;
+  const char *rn = P == 0 && rest >= 0 && nt_kind(nt, rest) == NK_RestParameterNode ? nt_str(nt, rest, "name") : NULL;
+  int lone_x = P == 1 && rest < 0 && nt_kind(nt, pre[0]) == NK_RequiredParameterNode;
+  if (!lone_x && !(rn && *rn)) return 0;
+  if (nt_int(nt, blk, "sym_proc_block", 0) || nt_str(nt, blk, "sym_proc")) return 0;
+  static const char *const any_shape[] = {
+    "map", "collect", "flat_map", "collect_concat", "filter_map", "count",
+    "any?", "all?", "none?", "one?", NULL };
+  if (str_in(nm, any_shape)) return 1;
+  return lone_x && sp_streq(nm, "uniq");
+}
+
+static int one_value_enum_source(Compiler *c, int hop, const char *nm, int blk) {
+  const NodeTable *nt = c->nt;
   int src = hop >= 0 && nt_kind(nt, hop) == NK_CallNode ? nt_ref(nt, hop, "receiver") : -1;
   const char *sn = src >= 0 && nt_kind(nt, src) == NK_CallNode ? nt_str(nt, src, "name") : NULL;
-  return sn && (sp_streq(sn, "chunk_while") || sp_streq(sn, "slice_when") || sp_streq(sn, "chunk") ||
-                sp_streq(sn, "slice_before") || sp_streq(sn, "slice_after"));
+  if (!sn || !(sp_streq(sn, "chunk_while") || sp_streq(sn, "slice_when") || sp_streq(sn, "chunk") ||
+               sp_streq(sn, "slice_before") || sp_streq(sn, "slice_after")))
+    return 0;
+  /* ...when the method is the builtin's. A method of the program's own by
+     one of these names answers what it likes (`def chunk = [5, 6].each_with_index`
+     yields two values), and its hop reads the Enumerator's flag as any other
+     does. That is read only where the call is proven to reach the program's
+     own: any other call is the builtin's. The proof is of the program's one
+     def of the name: where the program as written holds another, a Symbol of
+     the name (a reader, a Struct member), or a site where a method is named,
+     made or loaded by something the text does not spell, the def CRuby runs
+     may be one the compiler does not hold (an_prog_never_gives). */
+  if (!own_enum_hop_proven(nt, nm, blk) || !an_prog_never_gives(sn, 1)) return 1;
+  int sr = nt_ref(nt, src, "receiver");
+  /* a Range, a Hash or an Enumerable object reaches the builtin's through
+     a to_a put in front of it, which reads as an Array */
+  const char *rn = sr >= 0 && nt_kind(nt, sr) == NK_CallNode ? nt_str(nt, sr, "name") : NULL;
+  if (rn && (sp_streq(rn, "to_a") || sp_streq(rn, "__enum_to_a"))) return 1;
+  if (sr < 0 || nt_kind(nt, sr) == NK_SelfNode) {
+    const Scope *s = comp_scope_of(c, src);
+    if (!s || s->class_id < 0) return comp_method_index(c, sn) < 0;
+    if (s->is_cmethod) return comp_cmethod_in_chain(c, s->class_id, sn, NULL) < 0;
+    return comp_method_in_chain(c, s->class_id, sn, NULL) < 0;
+  }
+  TyKind st = infer_type(c, sr);
+  if (ty_is_object(st)) {
+    /* its class's own; Object's is behind an Enumerable the class includes */
+    int dc = -1, mi = comp_method_in_chain(c, ty_object_class(st), sn, &dc);
+    if (mi >= 0 && dc >= 0 && !sp_streq(c->classes[dc].name, "Object") && !sp_streq(c->classes[dc].name, "Kernel")) return 0;
+    return 1;
+  }
+  if (nt_kind(nt, sr) == NK_ConstantReadNode) {
+    int ci = comp_class_index(c, nt_str(nt, sr, "name"));
+    return ci < 0 || comp_cmethod_in_chain(c, ci, sn, NULL) < 0;
+  }
+  /* a builtin's value whose own class the program reopened with the name:
+     a call that carries a block is still the builtin's */
+  if (nt_ref(nt, src, "block") >= 0) return 1;
+  const char *cn = ty_is_array(st) ? "Array" : ty_is_hash(st) ? "Hash" : st == TY_RANGE ? "Range" : NULL;
+  int ci = cn ? comp_class_index(c, cn) : -1;
+  return ci < 0 || comp_method_in_class(c, ci, sn) < 0;
 }
 
 void enum_hop_yield_view(Compiler *c, int id, int hop) {
@@ -11368,7 +11441,7 @@ void enum_hop_yield_view(Compiler *c, int id, int hop) {
   int blk = nt_ref(nt, id, "block");
   const char *nm = nt_str(nt, id, "name");
   if (blk < 0 || !nm || !enum_pair_spread_iter(nm) || enum_pair_source_call(nt, hop)) return;
-  if (one_value_enum_source(nt, hop)) return;
+  if (one_value_enum_source(c, hop, nm, blk)) return;
   /* the builtins' own walks (builtins/, `each { |x| yield x }`) hand the
      packed item on as the one value their block takes */
   const char *sn = comp_scope_of(c, id)->name;
