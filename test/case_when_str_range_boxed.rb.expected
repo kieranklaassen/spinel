@@ -1,0 +1,14 @@
+band: low high digit other other other other
+band hash: low high digit other
+band array: other digit
+edge: excluded beginless beginless endless none none
+edge hash: excluded none endless
+many: hit miss hit hit hit
+held: in out in out
+value: 1 2 2 1
+made by the case: 0
+nil beside a handle: other low
+NUL past the end: other out
+binary: out in
+an equal Range: other low
+ends made on the spot: 50

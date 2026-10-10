@@ -4083,6 +4083,16 @@ static SP_INLINE sp_bool sp_poly_rb_equal(sp_RbVal a, sp_RbVal b) {
     return TRUE;
   return sp_poly_eq(a, b);
 }
+/* A boxed object as the subject of `when` against a String Range. The arm
+   asked the subject whether it equals the Range, and an object of one of
+   the program's classes is still asked that, by its own ==, held while the
+   Range is boxed for it. A shared String handle is covered by its bytes;
+   any other object of the runtime's is not covered. */
+static SP_NOINLINE sp_bool sp_srange_when_obj(sp_StrRange r, sp_RbVal v) {
+  if (v.cls_id < 0) return sp_poly_is_strbuf(v) && sp_srange_cover_handle(r.first, r.last, r.excl, v.v.p);
+  SP_GC_ROOT_RBVAL(v);
+  return sp_poly_eq(v, sp_box_srange(r));
+}
 /* `a == b` (or `!=`) answered as a value: a program object's own == gives
    whatever it returns (Ruby's == may answer any object), `!=` its
    negation; anything else the runtime equality. */
