@@ -1,0 +1,282 @@
+message: diff of the superseded hand-over's against this one
+63,65c63,91
+< class, 29 of 30 read back wrong, without the flag. An ensure with no
+< rescue clause, a method's, a filter block's or a synchronize body's,
+< makes the object of a raise it catches while a cause waits for it ("An
+---
+> class, 29 of 30 read back wrong, without the flag.
+> 
+> An ensure with no rescue clause, a begin's or a method's, makes the
+> object of a raise that passes through it and holds it for the raise
+> after its body ("An ensure keeps a String raise's message for the raise
+> after it"), with that function again, and the arm typed to the class
+> takes what it is handed:
+> 
+>     class Wide < StandardError
+>       attr_accessor :a, :b, :c, :d, :e, :f, :g, :h, :i, :j, :k, :l
+>     end
+>     def go
+>       raise Wide, "wide"
+>     ensure
+>       $kept = [ArgumentError.new("kept 0"), ArgumentError.new("kept 1")]
+>     end
+>     begin
+>       go
+>     rescue Wide => x
+>       x.a = -1; x.b = -2; x.c = -3; x.d = -4; x.e = -5; x.f = -6
+>       x.g = -7; x.h = -8; x.i = -9; x.j = -10; x.k = -11; x.l = -12
+>       puts x.a + x.l    # segmentation fault; CRuby: -13
+>     end
+> 
+> With four attributes the program is right in a plain run, by where
+> the stores land, and faults under SPINEL_GC_STRESS; with two, in a
+> loop that keeps the exceptions, nothing faults and 30 of 30 read back
+> wrong. Where a cause waits for the raise, such an ensure, a filter
+> block's and a synchronize body's make the object as they catch it ("An
+93,94c119,122
+< class ahead of the call (sp_exc_hold_own), and that function does not
+< change. A name that is no row is built as it was.
+---
+> class ahead of the call (sp_exc_hold_own), and where sp_exc_ensure_obj()
+> would, it calls an entry that builds such a class first and holds it
+> as that function holds its own (sp_exc_ensure_own); neither function
+> changes. A name that is no row is built as it was.
+99c127,128
+< same builder with that function's own test of the message.
+---
+> same builder with that function's own test of the message and its
+> root of the caller's message.
+106,118c135,148
+< a class, and 18 where it is raised under a rescue and leaves through an
+< ensure with no rescue clause; and an arm that names no class of the
+< program builds such a class in 148 fewer. Around these, glibc's string
+< compares count 22 to 66 more for the same calls (17,400,000 of strcmp in
+< 150,000 turns either way): the class's name is a row of the table and no
+< longer the literal, and strcmp enters by its page-crossing path by the
+< two addresses' offsets in their pages. Compiling a program that only
+< defines such classes runs about 19,000 more instructions a class: 1.4%
+< more at 300 of them, 0.4% at 2,000. A class with an ivar that is no such
+< class is asked once what it is: 292 instructions for one that is no
+< exception, 1,179 for an exception class with an initialize of its own. A
+< program with no class of its own compiles as it did, to within 340
+< instructions and glibc's string compares.
+---
+> a class, and 17 to 19 where it leaves through an ensure with no rescue
+> clause; and an arm that names no class of the program builds such a
+> class in 147 fewer. An ensure nothing is raised through runs what it
+> did. Around these, glibc's string compares count 22 to 66 more for the
+> same calls (17,400,000 of strcmp in 150,000 turns either way): the
+> class's name is a row of the table and no longer the literal, and strcmp
+> enters by its page-crossing path by the two addresses' offsets in their
+> pages. Compiling a program that only defines such classes runs about
+> 19,000 more instructions a class: 1.3% more at 300 of them, 0.6% at
+> 1,000, 0.4% at 2,000. A class with an ivar that is no such class is
+> asked once what it is: 292 instructions for one that is no exception,
+> 1,179 for an exception class with an initialize of its own. A program
+> with no class of its own compiles as it did, to within 340 instructions
+> and glibc's string compares.
+125,127c155,157
+< entries it has five callers, gcc and clang then inline it into none,
+< and sp_exc_new, one of them, would run 2 instructions more for every
+< exception of every program.
+---
+> entries it has five callers, gcc at the Makefile's flags then inlines
+> it into none, and sp_exc_new, one of them, would run 2 instructions
+> more for every exception of every program.
+138,139c168,169
+< compiler does not (an `inherited` hook, a `to_ary`), and where one of
+< them stores a zero the zeroed slot is CRuby's answer.
+---
+> compiler does not (a `to_ary` under a multiple assignment), and where
+> one of them stores a zero the zeroed slot is CRuby's answer.
+149c179,181
+< the base size; the arm typed to the class builds it as itself.
+---
+> the base size; the arm typed to the class builds it as itself, unless
+> an ensure held it first: the ensure builds it at the base size, as
+> before this change, and the arm takes that object.
+153a186,189
+> 
+> Nor `cause: nil` on a raise under a rescue that leaves through a
+> method's ensure: `e.cause` is the exception that was in flight, where
+> CRuby gives nil, for such a class as for a builtin exception.
+body: diff of the superseded hand-over's against this one
+11,13c11,13
+< | a builtin, caught by `rescue StandardError => e` | 2389.67 | +5.00 | +5.00 | 0.00 |
+< | the class, raised by name, caught by `rescue PErr => e` | 5620.06 | +68.10 | +2.10 | +66.00 |
+< | `PErr.new("x")` alone | 4473.72 | +24.02 | +2.02 | +22.00 |
+---
+> | a builtin, caught by `rescue StandardError => e` | 2408.74 | +5.00 | +5.00 | 0.00 |
+> | the class, raised by name, caught by `rescue PErr => e` | 5620.08 | +68.09 | +2.09 | +66.00 |
+> | `PErr.new("x")` alone | 4473.74 | +24.02 | +2.02 | +22.00 |
+15,17c15,19
+< | the class, raised by name, caught by `rescue StandardError => e` | 6085.68 | -188.52 | -147.63 | -40.89 |
+< | a builtin raised under a rescue, leaving through an ensure with no rescue clause | 4931.71 | +18.00 | +18.00 | 0.00 |
+< | the class, raised and leaving the same way, caught by `rescue PErr => e` | 8713.73 | -167.93 | -159.87 | -8.05 |
+---
+> | the class, raised by name, caught by `rescue StandardError => e` | 6104.76 | -187.54 | -146.65 | -40.89 |
+> | a builtin leaving through an ensure with no rescue clause | 2611.51 | +19.00 | +19.00 | 0.00 |
+> | the class, leaving the same way, caught by `rescue PErr => e` | 6393.53 | -169.70 | -161.68 | -8.02 |
+> | a builtin raised under a rescue, leaving through such an ensure | 4977.87 | +17.00 | +17.00 | 0.00 |
+> | the class, raised and leaving the same way, caught by `rescue PErr => e` | 8759.90 | -163.81 | -155.75 | -8.05 |
+21,52c23,57
+< subclass's own, larger object, and in the sixth two range tests and the test
+< ahead of `sp_exc_caught_obj()`. In the second, third and fourth rows the
+< last column is no work this change adds: the compares are the runtime's walk
+< up the class's ancestry by name, called the same number of times on both
+< (17,400,000 `strcmp` calls in the second row's 150,000 turns); in the fifth
+< and the last row the catch asks less. glibc's `strcmp` enters by its
+< page-crossing path according to the two addresses' offsets in their pages,
+< 11 instructions dearer, and the class's name is now a row of a table and no
+< longer the literal. It moves with the layout, so it is shown beside the
+< cost: built with clang 18.1 that column reads 0.00, -30.00 and +40.25 in
+< those three rows, and their totals are +2.10, -27.98 and +66.49; the first
+< row is +6.01 there and the sixth +20.00, all the change's own. A program
+< with no such class emits the C it did and costs what it did, through such an
+< ensure too, and a class with an `initialize` of its own costs what it did,
+< to the instruction. Master ran right, and so gains nothing for what it pays:
+< a program that has such a class and catches a builtin (the 5, whether or not
+< the class is ever raised, and the 18 where the builtin leaves through such
+< an ensure), and one that stores nothing in the class it builds (the 2; the
+< 25 where the subclass's attributes are never stored). Compiling a program
+< that only defines such classes runs about 19,000 more instructions for each
+< of them, and more for the first (callgrind of `spinel -c`): 1.4% more at 300
+< classes, 0.7% at 1,000 and 0.4% at 2,000. No other program emits different
+< C. A class that has an ivar and is no such class is asked once what it is,
+< which costs the compiler 292 instructions for a class that is no exception
+< (0.02% at 300 of them) and 1,179 for an exception class with an `initialize`
+< of its own (0.05%); a program with no class of its own runs 340 fewer (`p
+< 1`) to 273 more (seven lines with a rescue). Around that, glibc's string
+< compares cost more or less for the same calls, by where the strings lie
+< (649,862 `strncmp` calls on both at 300 plain classes), so the totals move
+< either way with the run: +0.14% for `p 1`, +0.04% for the seven lines,
+< 0.00% for the 300 plain classes and -0.09% for optcarrot in one, and +0.15%,
+< 0.00%, 0.00% and -0.09% in the next.
+---
+> subclass's own, larger object, and in the sixth and the eighth the tests
+> ahead of `sp_exc_caught_obj()` and of `sp_exc_ensure_obj()`, a range test in
+> each. In the second, third and fourth rows the last column is no work this
+> change adds: the compares are the runtime's walk up the class's ancestry by
+> name, called the same number of times on both (17,400,000 `strcmp` calls in
+> the second row's 150,000 turns); in the fifth, the seventh and the last row
+> the builder asks less. glibc's `strcmp` enters by its page-crossing path
+> according to the two addresses' offsets in their pages, 11 instructions
+> dearer, and the class's name is now a row of a table and no longer the
+> literal. It moves with the layout, so it is shown beside the cost: built
+> with clang 18.1 that column reads 0.00, -30.00 and +40.25 in those three
+> rows, and their totals are +2.10, -27.98 and +66.48; the first row is +6.00
+> there, the sixth +12.00 and the eighth +26.99, all the change's own. A
+> program with no such class emits the C it did and costs what it did, through
+> such an ensure too, and a class with an `initialize` of its own costs what
+> it did, to the instruction. An ensure nothing is raised through costs what
+> it did in a program that has such a class as well (252.00 a turn on both).
+> Master ran right, and so gains nothing for what it pays: a program that has
+> such a class and catches a builtin (the 5, whether or not the class is ever
+> raised, and the 19 or 17 where the builtin leaves through such an ensure),
+> and one that stores nothing in the class it builds (the 2; the 25 where the
+> subclass's attributes are never stored). Compiling a program that only
+> defines such classes runs about 19,000 more instructions for each of them,
+> and more for the first (callgrind of `spinel -c`): 1.3% more at 300 classes,
+> 0.6% at 1,000 and 0.4% at 2,000. No other program emits different C. A class
+> that has an ivar and is no such class is asked once what it is, which costs
+> the compiler 292 instructions for a class that is no exception (0.02% at 300
+> of them) and 1,179 for an exception class with an `initialize` of its own
+> (0.05%); a program with no class of its own runs 340 fewer (`p 1`) to 271
+> more (seven lines with a rescue). Around that, glibc's string compares cost
+> more or less for the same calls, by where the strings lie (649,862 `strncmp`
+> calls on both at 300 plain classes), so the totals move either way with the
+> run: -0.32% for `p 1`, -0.14% for the seven lines, +0.03% for the 300 plain
+> classes and +0.01% for optcarrot in one, and -0.30%, -0.11%, +0.03% and
+> +0.01% in the next.
+117,122c122,164
+< (`test/exception_attribute_ensure_clause.rb`), without the flag. An ensure
+< with no rescue clause (a method's, a filter block's, a `synchronize` body's)
+< makes the object of a raise it catches while a cause waits for it ("An
+< ensure keeps the cause of a String raise it raises again"), with that
+< function as well: raised under a rescue and caught afterwards by the arm
+< typed to the class, 39 of 40 read back wrong (the same test).
+---
+> (`test/exception_attribute_ensure_clause.rb`), without the flag.
+> 
+> An ensure with no rescue clause, a `begin`'s or a method's, makes the object
+> of a raise that passes through it and holds it for the raise after its body
+> ("An ensure keeps a String raise's message for the raise after it"), with
+> that function again. The arm typed to the class takes the object it is
+> handed as the class's struct:
+> 
+> ```ruby
+> class Wide < StandardError
+>   attr_accessor :a, :b, :c, :d, :e, :f, :g, :h, :i, :j, :k, :l
+> end
+> 
+> def go
+>   raise Wide, "wide"
+> ensure
+>   $kept = [ArgumentError.new("kept 0"), ArgumentError.new("kept 1")]
+> end
+> 
+> begin
+>   go
+> rescue Wide => x
+>   x.a = -1; x.b = -2; x.c = -3; x.d = -4; x.e = -5; x.f = -6
+>   x.g = -7; x.h = -8; x.i = -9; x.j = -10; x.k = -11; x.l = -12
+>   puts x.a + x.l         # Spinel: segmentation fault; CRuby -13
+>   puts x.message
+> end
+> $kept.each { |o| puts o.class, o.message }
+> ```
+> 
+> That is a segmentation fault in a plain run, with gcc and with clang, with
+> `--share-strings` and without. With four attributes, each read back, the
+> program is right in a plain run, by where the stores land, and faults under
+> `SPINEL_GC_STRESS`. With two, in a loop that keeps the exceptions, nothing
+> faults and 30 of 30 read back wrong (the same test, whose last part is the
+> road above, through a method's ensure).
+> 
+> Where a cause waits for the raise, such an ensure, a filter block's and a
+> `synchronize` body's make the object as they catch it ("An ensure keeps the
+> cause of a String raise it raises again"), with that function as well:
+> raised under a rescue and caught afterwards by the arm typed to the class,
+> 39 of 40 read back wrong (the same test), and the program above with its
+> raise under a rescue is the same segmentation fault.
+152,154c194,197
+< that function does not change. The catch alone, at the right
+< size but with the base scan, would trade the write past the end for the
+< freed value above.
+---
+> where `sp_exc_ensure_obj()` would, it calls an entry that builds such a
+> class first and holds it as that function holds its own; neither function
+> changes. The catch alone, at the right size but with the base scan, would
+> trade the write past the end for the freed value above.
+160c203
+< test of the message.
+---
+> test of the message and its root of the caller's message.
+167,168c210,211
+< it did: with five callers in place of three, gcc and clang inline it into
+< none.
+---
+> it did: with five callers in place of three, gcc at the Makefile's flags
+> inlines it into none on its own.
+185,187c228,229
+< compiler does not (an `inherited` hook, a `to_ary` under a multiple
+< assignment), and where one of them stores a zero in the attribute, the
+< zeroed slot is CRuby's answer.
+---
+> compiler does not (a `to_ary` under a multiple assignment), and where one of
+> them stores a zero in the attribute, the zeroed slot is CRuby's answer.
+209c251,253
+< class builds it as itself. And a subclass caught by an arm
+---
+> class builds it as itself, unless an ensure held it first: the ensure
+> builds it at the base size, as on master, and the arm takes that object.
+> And a subclass caught by an arm
+213a258,261
+> Nor `cause: nil` on a raise under a rescue that leaves through a method's
+> ensure: `e.cause` is the exception that was in flight, where CRuby gives
+> nil, for such a class as for a builtin exception on master.
+> 
+229c277
+< Run on this head in a Linux container (gcc 13, clang 18, CRuby 3.3.6), both sides built with the rbs parser: the six tests pass in twelve cells each (gcc and clang, with and without `--share-strings`, `SPINEL_GC_STRESS` 0, 1 and 2), `tools/gate.rb check` passes with the commit staged, `gc-stress-test`, `int-min-test`, `shadow-check`, `inline-rbs-test`, `share-strings-test` and `share-verify-test` pass, and against master the corpus emits the same C for all but twelve programs, with `--share-strings` and without (five of the tests and seven with such a class); those twelve and the sixth test pass in the corpus lane at `-O1`, with `SPINEL_SHARE_STRINGS=1` and without. The cost table was measured on this head. The `.expected` files match CRuby 3.3.6 run with `--enable-frozen-string-literal`.
+---
+> Run on this head in a Linux container (gcc 13, clang 18, CRuby 3.3.6), both sides built with the rbs parser: the six tests pass in twelve cells each (gcc and clang, with and without `--share-strings`, `SPINEL_GC_STRESS` 0, 1 and 2), `tools/gate.rb check` passes with the commit staged, `gc-stress-test`, `int-min-test`, `defer-refusals-test`, `shadow-check`, `inline-rbs-test` and `share-strings-test` pass, and against master the corpus emits the same C for all but twelve programs, with `--share-strings` and without (five of the tests and seven with such a class); those twelve and the sixth test pass in the corpus lane at `-O1`, with `SPINEL_SHARE_STRINGS=1` and without. `share-verify-test` reports no new diagnostic and one failure, in this container, for a program with no such class (`test/share/share_strings_net_http_zlib.rb`, whose C differs with the check flags on master as it does here, byte for byte). The cost table was measured on this head. The `.expected` files match CRuby 3.3.6 run with `--enable-frozen-string-literal`.

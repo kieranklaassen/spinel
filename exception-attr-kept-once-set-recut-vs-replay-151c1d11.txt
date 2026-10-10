@@ -1,0 +1,192 @@
+diff --git a/lib/sp_exc.c b/lib/sp_exc.c
+index e9899a541..e1e4a2e45 100644
+--- a/lib/sp_exc.c
++++ b/lib/sp_exc.c
+@@ -186,8 +186,8 @@ sp_bool sp_exc_cls_unnamed(const char *shown) {
+ }
+ /* The default message text of class `cn` when its display differs from the key,
+    as a string on the heap the caller roots; sp_str_empty when it does not.
+-   Inline by hand: gcc and clang inline it on their own into three callers and
+-   into none of five, and sp_exc_new is one of them. */
++   Inline by hand: with five callers gcc, at the Makefile's flags, inlines it
++   into none on its own, and sp_exc_new is one of them. */
+ static SP_INLINE const char *sp_exc_disp_heap(const char *cn) {
+   if (!sp_class_display_fn) return sp_str_empty;
+   const char *d = sp_exc_cls_display(cn);
+@@ -304,10 +304,12 @@ void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg, voi
+ }
+ /* The same, where sp_exc_new_for_catch built the exception before its class
+    was built at its own size: a frozen message stays frozen there, by that
+-   function's own test of the message it is handed. */
++   function's own test of the message it is handed, and the caller's
++   message is rooted before it is copied, as that function roots it. */
+ void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *)) {
+   int fz = msg && msg != sp_exc_no_msg && !sp_cmsg_p(msg) &&
+            (((const unsigned char *)msg)[-1] == 0xfa || ((const unsigned char *)msg)[-1] == 0xf8);
++  const char *msg0 = msg; SP_GC_ROOT_STR(msg0);
+   sp_Exception *e = (sp_Exception *)sp_exc_sub_build(sz, cls_name, msg, scan);
+   if (fz && e->msg) ((unsigned char *)e->msg)[-1] = 0xfa;
+   return e;
+diff --git a/src/codegen.c b/src/codegen.c
+index 9642e6cea..e41c5ea3a 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -9337,6 +9337,14 @@ const char *exc_catch_builder(Compiler *c) {
+   return g_xbn_n ? "sp_exc_catch_own" : "sp_exc_new_for_catch";
+ }
+ 
++/* What an ensure calls to hold the exception that passes through it
++   (sp_exc_ensure_obj): the entry that makes such a class as itself first,
++   in a program that has one. */
++const char *exc_ensure_builder(Compiler *c) {
++  exc_by_name_rows(c);
++  return g_xbn_n ? "sp_exc_ensure_own" : "sp_exc_ensure_obj";
++}
++
+ /* What stands ahead of sp_exc_caught_obj() where an ensure with no rescue
+    clause catches an exception to raise it again: that function builds one
+    raised without an object, when a cause waits for it, at the base size, so
+@@ -9360,7 +9368,8 @@ static void emit_exc_by_name_table(Compiler *c, Buf *b) {
+     if (g_xbn_row[i] >= 0) buf_printf(b, "%s\"\\xff\" \"%s\"", g_xbn_row[i] ? ", " : "", exc_by_name_row_name(c, i));
+   buf_puts(b, "};\nstatic void *sp_exc_own_by_name(const char *cls, const char *msg, int caught);\n"
+               "static sp_Exception *sp_exc_catch_own(const char *cls, const char *msg);\n"
+-              "static void sp_exc_hold_own(void);\n");
++              "static void sp_exc_hold_own(void);\n"
++              "static void *sp_exc_ensure_own(void **obj, const char **msg, const char *cls);\n");
+ }
+ 
+ /* The rest of a sp_exc_new_sub_ivars call for such a class: its own scan,
+@@ -16848,7 +16857,14 @@ static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
+                 "  sp_Exception *u = (sp_Exception *)sp_exc_own_by_name(sp_exc_cls[sp_exc_top], sp_exc_msg[sp_exc_top], 1);\n"
+                 "  if (!u) return;\n"
+                 "  sp_gc_wb((void *)u); u->cause = (sp_Exception *)sp_pending_cause;\n"
+-                "  sp_exc_obj[sp_exc_top] = u;\n}\n");
++                "  sp_exc_obj[sp_exc_top] = u;\n}\n"
++                /* sp_exc_ensure_obj's lines, for a row only */
++                "SP_UNUSED static void *sp_exc_ensure_own(void **obj, const char **msg, const char *cls){\n"
++                "  if (!*obj) {\n"
++                "    sp_Exception *u = (sp_Exception *)sp_exc_own_by_name(cls, *msg, 1);\n"
++                "    if (u) { *obj = u; if (*msg && !sp_exc_msg_empty_given(*msg) && u->msg) *msg = u->msg; return u; }\n"
++                "  }\n"
++                "  return sp_exc_ensure_obj(obj, msg, cls);\n}\n");
+   }
+ 
+   /* User exception #message / #to_s overrides: a cls_name-keyed dispatcher so
+diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+index 05793ef24..3b7e48793 100644
+--- a/src/codegen_internal.h
++++ b/src/codegen_internal.h
+@@ -2213,6 +2213,7 @@ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b);
+ int class_exc_built_by_name(Compiler *c, int cid);
+ const char *exc_catch_builder(Compiler *c);
+ const char *exc_hold_own(Compiler *c);
++const char *exc_ensure_builder(Compiler *c);
+ int class_exc_by_name_row(Compiler *c, int cid);
+ void emit_exc_cls_name(Compiler *c, int cid, const char *name, Buf *b);
+ int class_exc_has_by_name_sub(Compiler *c, int cid);
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 836c29c4c..2431ea6aa 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -10247,8 +10247,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar)
+        through it as its cause (#3745) */
+     emit_indent(b, indent);
+     buf_printf(b, "void *_ic%d = sp_inflight_cause;"
+-                  " if (_excf%d) sp_inflight_cause = sp_exc_ensure_obj(&_excobj%d, &_excmsg%d, _exccls%d);\n",
+-               eid, eid, eid, eid, eid);
++                  " if (_excf%d) sp_inflight_cause = %s(&_excobj%d, &_excmsg%d, _exccls%d);\n",
++               eid, eid, exc_ensure_builder(c), eid, eid, eid);
+     /* The ensure's reads are not the method's return. Keep both a
+        published handle and a fresh tail's cleared channel across them. */
+     Scope *sc = comp_scope_of(c, id);
+diff --git a/test/exception_attribute_ensure_clause.rb b/test/exception_attribute_ensure_clause.rb
+index f9bab855e..a84d30cd8 100644
+--- a/test/exception_attribute_ensure_clause.rb
++++ b/test/exception_attribute_ensure_clause.rb
+@@ -97,3 +97,71 @@ late.each_with_index do |e, i|
+   bad += 1 unless e.tag == "tag-#{i}" && e.at == [i, "a#{i}"] && e.message == "t#{i}" && e.cause.message == "c#{i}"
+ end
+ p bad, late.size
++
++# no cause waiting: the ensure makes the object and holds it for the raise
++# after its body
++plain = []
++30.times do |i|
++  begin
++    begin
++      raise Tagged, "n#{i}"
++    ensure
++      plain.size
++    end
++  rescue Tagged => e
++    e.tag = "tag-#{i}"
++    e.at = [i, "a#{i}"]
++    plain << e
++  end
++end
++2000.times { |i| junk << "z#{i}" }
++bad = 0
++plain.each_with_index do |e, i|
++  bad += 1 unless e.tag == "tag-#{i}" && e.at == [i, "a#{i}"] && e.message == "n#{i}" && e.class == Tagged
++end
++p bad, plain.size
++
++# and the ensure's own body raises: the object is the cause of what the
++# body raised
++class Wide < StandardError; attr_accessor :a, :b, :c, :d, :e, :f; end
++wide = []
++300.times do |i|
++  begin
++    begin
++      begin
++        raise Wide, "w#{i}"
++      ensure
++        raise ArgumentError, "e#{i}"
++      end
++    rescue ArgumentError => x
++      raise x.cause
++    end
++  rescue Wide => w
++    w.a = "a#{i}"; w.b = [i, "b#{i}"]; w.c = "c#{i}"; w.d = [i]; w.e = "e#{i}"; w.f = i + 1
++    wide << w
++  end
++end
++bad = 0
++wide.each_with_index do |w, i|
++  bad += 1 unless w.a == "a#{i}" && w.b == [i, "b#{i}"] && w.c == "c#{i}" && w.d == [i] && w.e == "e#{i}" &&
++                  w.f == i + 1 && w.message == "w#{i}" && w.class == Wide
++end
++p bad, wide.size
++
++# a method's ensure, and stores enough to leave an object of the base size
++class Dozen < StandardError
++  attr_accessor :a, :b, :c, :d, :e, :f, :g, :h, :i, :j, :k, :l
++end
++def dozen
++  raise Dozen, "dozen"
++ensure
++  $kept = [ArgumentError.new("kept 0"), ArgumentError.new("kept 1")]
++end
++begin
++  dozen
++rescue Dozen => x
++  x.a = -1; x.b = -2; x.c = -3; x.d = -4; x.e = -5; x.f = -6
++  x.g = -7; x.h = -8; x.i = -9; x.j = -10; x.k = -11; x.l = -12
++  p x.a + x.l, x.message
++end
++p $kept.map { |o| [o.class, o.message] }
+diff --git a/test/exception_attribute_ensure_clause.rb.expected b/test/exception_attribute_ensure_clause.rb.expected
+index 866f81d32..de74c5f65 100644
+--- a/test/exception_attribute_ensure_clause.rb.expected
++++ b/test/exception_attribute_ensure_clause.rb.expected
+@@ -4,3 +4,10 @@
+ 0
+ 0
+ 40
++0
++30
++0
++300
++-13
++"dozen"
++[[ArgumentError, "kept 0"], [ArgumentError, "kept 1"]]

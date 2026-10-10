@@ -1,0 +1,340 @@
+# Row 264, piece one, re-cut on master's tip: the reader's delta against a5879e969d0f
+
+Title, unchanged: "An attribute of an exception class with no initialize is
+kept once set". Texts v3.
+
+## Where it stands
+
+- Head 311af53becefa869fbebf4c0de261c5eaff26a85, ONE commit on upstream master
+  c52df8a11741eeffb2ab99b624f2b97440391a3a. Tree
+  784021b0510a21d6cf268dbcbd71e199faa7728c, 23 files, 752 added, 48
+  removed. "Depends on: none".
+- Upstream master at 07:06 UTC 10-10 (my own ls-remote) is
+  a3260d1a3aada1ef206d7619de42bb64d13cfe20, three commits past this head's
+  parent: "A Float array element compared in a cached loop reads nil-free,
+  as under + - * /", its merge and a benchmark (emit_call_compare_arms,
+  the nil-free operand emitters, nine additive lines of lib/spinel_rt.h,
+  one Makefile line). No function of the piece, of its proof or of its
+  tests is in that range; the head merges into it clean by exit status
+  (git merge-tree --write-tree, exit 0, tree
+  ff165f8fd4e7cad78ee4b31d9b28a226bbefd4cf). It was not built there.
+- It supersedes a5879e969d0f9effbd634b845f2e0d55d5699e78 on 2b0ebc0a6bfd
+  (comments 6092535836, 6092557320, 6092588349), whose code reader 8
+  passed at 03:29 UTC 10-10 with two text points (4a, 4b). Master moved 47
+  commits past that base, into four functions of the piece, and the last
+  of them, emit_begin, by text: that head no longer replays clean. So
+  this is the one re-cut on the tip, and it takes the two text points
+  with it.
+- The head adds no refusal to any build and lifts none:
+  docs/limitations.md is not touched.
+
+## 1. The range, 2b0ebc0a6bfd to c52df8a11741, by name
+
+Twenty-eight commits and nineteen merges. Master's changed lines and the
+piece's, laid against the tip's functions, share FOUR functions:
+emit_sym_class_name_rt (src/codegen.c), emit_rescue, emit_stmt_node and
+emit_begin (src/codegen_stmt.c). In lib/sp_exc.c master changes
+sp_exc_new_for_catch and adds sp_exc_ensure_obj, neither of which the
+piece changes. emit_and_or_begin_expr, emit_call_synchronize_arms,
+emit_array_filter_loop, emit_call_raise_arms, emit_call_new_arms,
+emit_exc_new_no_init, emit_exc_sub_new_arm, emit_user_exc_dispatch and
+codegen_program are as they were.
+
+- emit_begin and lib/sp_exc.c, by "An ensure keeps a String raise's
+  message for the raise after it". THE ONE CONFLICT, and the statement
+  the reader named. On 2b0ebc0a6bfd the statement after the ensure's
+  label made an object for the time the ensure's body ran and dropped it:
+  `_excobj ? _excobj : (void *)sp_exc_new_for_catch(_exccls, _excmsg)`,
+  and the piece wrote its builder's name there (exc_catch_builder).
+  Master now writes `sp_exc_ensure_obj(&_excobj, &_excmsg, _exccls)`: the
+  runtime makes the object with sp_exc_new_for_catch, HOLDS it in
+  _excobj for the raise after the body, and points the message local at
+  the object's copy. sp_exc_new_for_catch roots the caller's message
+  before it copies it.
+  (i) On the bare tip that is the reader's find, and a wider one than on
+  the old base: every raise of a class of the piece by name that leaves
+  through an ensure with no rescue clause is now held at the base size,
+  and the arm typed to the class takes that object. Three programs, my
+  runs, twelve cells each (gcc and clang, with and without
+  --share-strings, stress 0, 1, 2). The wide one (twelve attributes,
+  raised through a method's ensure, F's program, which the coordinator
+  ruled to this piece at 06:27): rc 139 in 12 of 12 on the bare tip,
+  CRuby's lines in 12 of 12 on the head. The same with four attributes,
+  each read back before and after the ensure's values are read: right in
+  4 of 12 on the bare tip (the four cells at stress 0), rc 139 in the 8
+  at stress 1 and 2; 12 of 12 on the head. A begin with an ensure, the
+  raise in its body, `rescue Tagged => e` around it storing two
+  attributes, 30 turns: 30 of 30 read back wrong on the bare tip in six
+  cells of six, nothing faults; right on the head in six (e4, and the
+  kept test's fourth part). On the old base the object was dropped after
+  the body and the arm built its own, at the class's size (by the old
+  statement; the run on 22593ab513fc that has the wide program right
+  there is F's, not mine).
+  The wide program with its raise inside a rescue, so that a cause waits
+  (F's second program): rc 139 in 12 of 12 on the bare tip, CRuby's lines
+  in 12 of 12 on the head, and in 12 of 12 on the replay with master's
+  side too. That road is not new: the object is made at the catch, and
+  a5879e969d0f already built it ahead of sp_exc_caught_obj()
+  (sp_exc_hold_own), which the reader passed; the test's third part
+  keeps it (39 of 40 on the bare tip). It is taken as the first of the
+  coordinator's three defaults of 06:37: cured, already a kept part, one
+  clause more in the body; no part was added for it.
+  (ii) How the piece stands there: sp_exc_ensure_obj and
+  sp_exc_new_for_catch are not changed. The statement is master's with
+  the function's name filled by a new exc_ensure_builder(c), which gives
+  "sp_exc_ensure_obj" in a program with no class of the piece, so that
+  program's C is master's byte for byte (the corpus check below), and
+  "sp_exc_ensure_own" in one that has such a class. sp_exc_ensure_own is
+  generated beside sp_exc_catch_own and sp_exc_hold_own: with no object
+  held yet it asks sp_exc_own_by_name for the raised name; a row is built
+  as itself, held in the ensure's local, and the message local pointed
+  at its copy, which are sp_exc_ensure_obj's own three lines; any other
+  name, and an object already held, go to sp_exc_ensure_obj. And
+  sp_exc_new_sub_caught, the piece's builder where sp_exc_new_for_catch
+  built before, roots the caller's message before it is copied, the line
+  master added to that function. The line is proven by a run and not
+  taken on trust: four workers each raising a class of the piece caught
+  by `rescue StandardError => e` (t2) abort at SPINEL_GC_STRESS=2 in 13
+  of 40 runs without it ("the mark reached a freed heap string", phase
+  globals:exceptions), in 0 of 40 with it and in 0 of 40 on the bare tip,
+  the last two with --share-strings as well.
+  (iii) Master's test ensure_keeps_string_raise_message passes in 12 of
+  twelve cells on the bare tip and on the head. The same four shapes with
+  a class of the piece, six attributes, the arm typed to it storing two
+  of them after the ensure's GC.start (n1): CRuby's lines on the head in
+  six cells. The object the ensure holds is one object: `$!` in the
+  ensure, kept, is `equal?` to what the arm is handed (n3), on both.
+- emit_sym_class_name_rt, by "A Class.new display and its NoMethodError
+  text are safe to build from several threads". Master's four hunks there
+  are in the emitters of sp_class_display, sp_class_name_or_nil and
+  sp_class_assign_name (the name assigned to a Class.new class, read
+  through the new anon_name_expr). The piece's two are above them: the
+  call that emits the table ahead of sp_class_to_s, and the row in
+  sp_class_to_s's case for a class of the piece. No line is shared, and
+  the two are built together: master's test
+  thread_anon_class_display_text passes in 8 of twelve cells on the bare
+  tip and on the head, the same 8, and aborts at stress 2 in the other 4
+  on both (master's own).
+- emit_rescue, by "A rescue clause checks its operands before a later
+  Exception". Master's three hunks are at the top of the function and
+  decide the MATCH: the new rescue_operand_is_class_name says whether an
+  operand is matched by the class's name; a constant the program defines
+  as no class (`XN = nil`, an alias `XA = ArgumentError`) now goes to
+  sp_exc_matches_operand, and only class names may stand before a
+  catchall. The piece's hunk is below the match, in the statement that
+  BUILDS what the arm caught, and reads nothing the new function
+  decides: it keys on spec_cid, the class the analyzer typed the `=> e`
+  binding to, and on the raised name's row. Whichever way the match was
+  decided, a raised name that is a row is built as itself, and any other
+  as master builds it. By a run, the bare tip against the head in six
+  cells each: an alias of StandardError as the operand, the caught value
+  kept and stored through a method of the class, with `rescue XN,
+  Exception` raising TypeError after it (o2): right on the head in six
+  cells, a fault on the bare tip at stress 1 and 2. An alias
+  of the class itself as the operand with `=> e` stored through a writer
+  (o1): refused by both alike, the binding is not typed. A call and an
+  alias before ArgumentError, and a call before Exception (o3): the same
+  lines on both. Master's test rescue_operand_before_exception passes in
+  12 of twelve cells on the bare tip and on the head.
+- emit_stmt_node, by "A singleton def that needs a self is refused where
+  it is emitted, so it defers": one new line, `sg_refused_def(c, id);`,
+  in the DefNode arm. The piece's hunk is the builder's name in the
+  modifier rescue's arm, 23 lines above, in another arm. Master's test
+  for it, test/defer/deferred_singleton_def_needing_self.rb, is run by
+  defer-refusals-test, which passes in the head's tree.
+- "A subclass definition fires its superclass's inherited hook"
+  (src/analyze_desugar.c, docs/limitations.md): no function of the piece.
+  It made ONE SENTENCE OF THE TEXTS UNTRUE, which v3 corrects: "CRuby runs
+  methods of the program that the compiler does not (an `inherited` hook,
+  a `to_ary`)". The hook is run now, so the example is the `to_ary` alone
+  (still not run on the tip: `a, b = Foo.new` gives nil for b). In the
+  roads set, eight programs whose hook defines an initialize now raise
+  NotImplementedError at run time, and one is refused, on the bare tip and
+  on the head alike.
+- The other commits of the range touch no function of the piece and none
+  its proof reads: the format, multiple-assignment, bind_call, bare-new,
+  --rbs and conditional-String changes; "A
+  runtime-name send's refusal is deferred under --defer-refusals like any
+  other" (one line each in reject_binding, reject_runtime_const_get,
+  reject_runtime_send, emit_call, emit_call_stmt), the forwarding,
+  instance_exec, scan-block and widening changes in the analyzer, "A loop
+  whose array headers are cached may return from its method" (hc_node_ok),
+  "A Float array's in-range read takes one test" (lib/sp_array.h), "A
+  Float digit count beside a class that defines the method is
+  range-checked too" (lib/spinel_rt.h, 14 lines by sp_poly_nonzero and
+  sp_poly_prec_n), "Sockets answer getsockname and getpeername"
+  (lib/sp_io.c, lib/sp_net.c, one line of sp_io_responds), the two
+  changes to a default's parameter (src/codegen_fold.c, ren_hide in
+  src/codegen_util.c, emit_proc_literal and emit_super_inline) and "A
+  String Range's inspect holds the begin's inspect while it inspects the
+  end" (sp_srange_inspect). The twelve programs whose C the piece changes
+  are the same twelve as on the old base.
+
+## 2. The re-cut against the replay
+
+a5879e969d0f replayed onto the tip conflicts in that one statement of
+emit_begin and nowhere else. Taking master's side of it whole gives the
+tree 151c1d1115bf, which is the replay "that drops the builder". The second
+block of this comment is `git diff 151c1d1115bf 784021b0510a`, all the
+re-cut adds to it: 6 files, 101 added, 7 removed.
+
+- src/codegen_stmt.c, src/codegen.c, src/codegen_internal.h: the
+  statement with exc_ensure_builder(c), that function, and the generated
+  sp_exc_ensure_own with its forward declaration (part 1, ii).
+- lib/sp_exc.c: the root of the caller's message in sp_exc_new_sub_caught
+  (part 1, ii), with its clause in the comment; and the comment over
+  sp_exc_disp_heap (4b): it said gcc and clang inline it into none of
+  five callers. It says what is true: "with five callers gcc, at the
+  Makefile's flags, inlines it into none on its own".
+- test/exception_attribute_ensure_clause.rb, three parts more. The fourth
+  is the plain road of part 1 (i): raised by name with no cause waiting,
+  through a begin's ensure, 30 times, the arm typed to the class storing
+  two attributes. The fifth is the reader's "for your eye" and the
+  coordinator's addition: raised by name with no cause waiting, in a
+  begin with only an ensure whose body raises; the class is read off that
+  raise's cause, raised again, and the arm typed to it stores six
+  attributes, 300 times. The sixth is the wide program, through a
+  method's ensure. None was a kept test: the six tests of a5879e969d0f
+  pass in 72 of 72 cells with the builder dropped from that statement on
+  the old base. With the three parts the test fails in 12 of 12 cells on
+  the tree above (the replay with master's side, built: "30 30" and "1
+  300" where CRuby prints "0 30" and "0 300", then rc 139 in the sixth
+  part, in a plain run), in 12 of 12 on the bare tip, and passes in 12 of
+  12 on the head. So a later replay of this piece, or of the neighbour's,
+  that leaves sp_exc_ensure_obj alone in that statement turns this test
+  red in the plain lane.
+
+## 3. The texts, v3 against v2
+
+The fourth block of the first comment is every changed line, as `diff`
+prints it. By point:
+
+- 4a: under "Not in this change", a class read off a value: "the arm typed
+  to the class builds it as itself, unless an ensure held it first: the
+  ensure builds it at the base size, as on master, and the arm takes that
+  object". By my run of the reader's two shapes and of the same raise
+  through an ensure with no cause waiting (a1, a2, a4): the same bytes on
+  the bare tip and on the head in all six cells each; with no ensure
+  between (a3), the head is right in six cells where the bare tip is
+  wrong at stress 1 and aborts at stress 2.
+- 4b: "gcc at the Makefile's flags" in the message and the body, as in the
+  comment; clang is no longer named.
+- The third class reached and not made, one sentence more under "Not in
+  this change": `cause: nil` on a raise under a rescue that leaves through
+  a method's ensure gives the exception in flight as `e.cause`, where
+  CRuby gives nil. By my run: the same line for a class of the piece, for
+  a class with an initialize and for the builtin TypeError, on the bare
+  tip and on the head, in six cells each.
+- The ensure with no rescue clause, as the coordinator ruled at 06:27:
+  "Before" on the bare tip by the three programs of part 1 (i), the wide
+  one printed in the message and the body, and one clause where the
+  entries are named (sp_exc_ensure_own). The title stays: it is true of
+  the ensure's road as of the clause's.
+- The `inherited` hook is no longer an example of a method the compiler
+  does not run (part 1).
+- The cost figures, measured again on this head (part 4), with a row for
+  a builtin that leaves through such an ensure with no cause waiting and
+  one sentence for an ensure nothing is raised through.
+- The body's "Before" is the bare tip's: 59 of 60, the two segmentation
+  faults, `[1, "r1"]`, 29 of 30, 39 of 40 and 30 of 30 are what
+  c52df8a11741 prints.
+
+## 4. The round on this head
+
+Both sides built with the rbs parser, bare c52df8a11741 and the head.
+
+- The six tests, twelve cells each: bare tip 18 of 72, head 72 of 72.
+- Corpus by C against the tip: 6,828 identical, 12 differ, 0
+  refusal changes; with CIDENT_FLAGS=--share-strings 6,827 identical, the
+  same 12 differ, 0 refusal changes, 1 refused by both alike. The 12 are
+  five of the tests and seven programs with such a class; every program
+  with no class of the piece emits the bare tip's C, the ensure's
+  statement with it.
+  tools/refusals.sh passes (650 records); reject-test passes.
+- The corpus lane at -O1 for those twelve and the sixth test: 13 PASS, and
+  13 PASS with SPINEL_SHARE_STRINGS=1.
+- optcarrot's C: identical on both.
+- Probe sets, each program on CRuby, the bare tip and the head in six
+  cells: the hooks' 18
+  programs (lost 0, cured 6, moved 30, exit status differs in 6 cells);
+  the body's 4 (lost 0, cured 17, exit status differs in 8); the 92 roads
+  (lost 0, moved 24, the four that print an address); 13 more (lost 0,
+  cured 22, exit status differs in 4); the decline's 51 twins (lost 0,
+  cured 0, moved 0); the frozen literal's 6 (lost 0); reader 8's first 3
+  (lost 0, cured 4). 187 programs, 1,122 cells, lost 0. The five pairs of
+  an unset read reached: 54 wrong lines on the head, 54 the twin's line on
+  the bare tip. The read past the end on the bare tip: 0 of 230,400 lines
+  equal CRuby's, in 960 runs.
+- The neighbour's and the reader's programs, the modifier's and the --rbs
+  ones (11): lost 0, cured 1,696; the neighbour's first, f1, is wrong on
+  this bare tip too (19 of 20 in 6 of 6 cells at -O0 and at -O2, as f2
+  and f3 are), and 0 on the head. The list (20): cured 152; its 2 lost
+  lines are l3b's, as before (CRuby's count of 30 there counts a cause;
+  the bare tip prints 30 at stress 2 by the attributes it loses and 0 at
+  stress 0, the head 0 in all six). The presence examples (2) and the
+  presence reads (91): the same lines on both. The presence twin: 136 of
+  140, as before.
+- The ensure's road (part 1): n1, n2, n3, e4, e7, a1 to a4, g1 to g3, o1
+  to o3 in six cells each, and the three wide programs in twelve: lost 0.
+- Costs, gcc then clang, tip to head: builtin by a StandardError arm
+  +5.00, +6.00; own arm +68.09, +2.10; .new +24.02, -27.98; parent arm
+  +85.05, +66.48; the class by a StandardError arm -187.54, -214.26; a
+  builtin through an ensure with no cause waiting +19.00, +12.00, and the
+  class the same way -169.70, -232.84; a builtin under a rescue through
+  the ensure +17.00, +26.99, and the class the same way -163.81, -210.96;
+  the builtin through the ensure in a program with no such class 0.00 and
+  0.00; an ensure nothing is raised through, in a program with such a
+  class, 252.00 a turn on both sides. The 19 are the tests and no call:
+  sp_exc_ensure_own made always-inline by hand in the generated C costs
+  the same 19 with gcc, and 18 with the range test written ahead of the
+  call. Compile: +2.6% for one such class, +1.34% at 300, +0.62% at
+  1,000, +0.36% at 2,000; own: 292 a plain class, 1,179 an exception
+  class with an initialize, -340 for `p 1`, +271 for the seven lines,
+  +1,582 for optcarrot.
+- The legs, in the head's tree: int-min-test, defer-refusals-test (with
+  master's test deferred_singleton_def_needing_self), share-strings-test,
+  gc-stress-test, shadow-check (890 programs) and inline-rbs-test pass.
+  share-verify-test exits 2 on ONE program, with 0 new diagnostics (1,158
+  programs, 8 stale entries, 1 failure):
+  test/share/share_strings_net_http_zlib.rb, "generated C differs with
+  the flags". It holds no class of the piece; its C with the check flags
+  and without is the same on the bare tip as on the head, byte for byte,
+  and differs between the two there too (42 lines): master's own, in this
+  container.
+- `tools/gate.rb check` with the commit staged: exit 0.
+- The mail (the third comment): `git am` on c52df8a11741, with the
+  mail's date as the committer date and committer Claude, gives the id.
+
+## 5. The neighbour
+
+"An ensure keeps the message of the exception it holds while its body
+runs" (9e3422fa5c30 on 2b0ebc0a6bfd) wrote sp_exc_new_for_ensure into the
+statement master has now rewritten itself, and its builder has dropped it
+(the coordinator, 06:37): nothing of the neighbour's stands on this
+commit, and this head names nothing of it. For any later change to that
+statement the rule is the one of part 2: whatever function stands there,
+a row must reach sp_exc_own_by_name before the base-size builder, and
+the kept test is red in the plain lane if it does not.
+
+## 6. Finds, one line each, not worked
+
+- thread_anon_class_display_text aborts at SPINEL_GC_STRESS=2 on the bare
+  tip ("the mark reached a freed slot"): gcc and clang, with and without
+  --share-strings.
+- An inherited hook whose body is `k.class_eval { def initialize ... }`
+  now raises NotImplementedError at run time where the program printed
+  CRuby's lines before the hook was fired.
+- Four workers each raising an exception class with attributes, caught by
+  the arm typed to it (`rescue Tagged => e`), abort at SPINEL_GC_STRESS=2
+  in about half the runs on the bare tip and on the head alike (18 and 20
+  of 40 on the bare tip, 25 and 18 on the head): as I read it, the typed
+  arm's builder copies the handler's message before it is rooted, the
+  hazard master's change above closed in sp_exc_new_for_catch.
+- A block that raises ArgumentError with a String through an ensure
+  calling GC.start, three times, followed by `raise
+  ArgumentError.new("made"), "given"` through such an ensure, aborts at
+  SPINEL_GC_STRESS=2 on the bare tip ("the mark reached a freed slot",
+  phase root); the head prints the same.
+- share-verify-test fails on the bare tip in this container for
+  test/share/share_strings_net_http_zlib.rb (its C differs with the check
+  flags), and lists 8 stale entries.
