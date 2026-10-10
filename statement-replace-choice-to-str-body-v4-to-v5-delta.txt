@@ -1,0 +1,7 @@
+The replace piece: body -v4 to -v5 (the one passage on the sources that pay with --share-strings). No code token changes; the head stays f0dd40d9b267; the commit message -v4 is unchanged.
+
+OLD:
+A write to `t` in place of the read pays the same where master ran it right: in a loop's `break`, and in the forms run ahead (`(t = "abc" if k)`). With `--share-strings` a plain write of a frozen literal keeps master's C in each of those places, and three sources beside it that master ran right there take the root, 16 to 22 instructions a statement with gcc and 14 to 15 with clang: `t &&= "abc"`, `u = t = "abc"` and `(t = "abc"; t)`. What they read back is the literal's too; the cut is made only where the write is a plain one and its value is the literal itself.
+
+NEW:
+A write to `t` in place of the read pays the same where master ran it right: in a loop's `break`, and in the forms run ahead (`(t = "abc" if k)`). With `--share-strings` a plain write of a frozen literal keeps master's C in each of those places. Other sources that master ran right there still take the root, among them `t &&= "abc"`, `u = t = "abc"`, `(t = "abc"; t)`, `t = __FILE__` and `t = k ? "abc" : "def"`: 16 to 22 instructions a statement with gcc and 14 to 15 with clang for these five. What they read back is a literal's too; the cut is made only where the write is a plain one and its value is a literal master's `share_frozen_literal` answers for, which is a String literal, a fold of literal parts, or `freeze`, `-@` or `dedup` of one, and not `__FILE__` or a choice between two.
