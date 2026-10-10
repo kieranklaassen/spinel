@@ -10209,11 +10209,13 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     buf_printf(b, "int _uk%d = sp_unwind_kind, _ut%d = sp_unwind_target, _ue%d = sp_unwind_exc_top; sp_proc_home *_uh%d = sp_unwind_home;\n",
                eid, eid, eid, eid);
     /* an exception raised from inside this ensure takes the one unwinding
-       through it as its cause (#3745) */
+       through it as its cause (#3745). The object made here for one that
+       came with none also keeps its raw message for the raise after the
+       body (sp_exc_new_for_ensure) */
     emit_indent(b, indent);
     buf_printf(b, "void *_ic%d = sp_inflight_cause;"
                   " if (_excf%d) sp_inflight_cause = _excobj%d ? _excobj%d"
-                  " : (void *)sp_exc_new_for_catch(_exccls%d, _excmsg%d);\n",
+                  " : (void *)sp_exc_new_for_ensure(_exccls%d, _excmsg%d);\n",
                eid, eid, eid, eid, eid, eid);
     /* The ensure's reads are not the method's return. Keep both a
        published handle and a fresh tail's cleared channel across them. */

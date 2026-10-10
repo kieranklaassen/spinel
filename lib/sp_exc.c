@@ -245,6 +245,24 @@ sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {
   }
   return e;
 }
+/* The exception an ensure holds while its body runs, for one that reached it
+   with no object: $! in the body and the cause of what the body raises. It
+   is sp_exc_new_for_catch's but for its message. The ensure raises the
+   exception again by class and raw message once the body has run, and
+   nothing keeps that message for it: a begin the body enters takes the
+   handler slot it was read from, and an inner ensure that handed the
+   exception on has popped that slot's frame, so the next collection frees
+   it. This object lives through the body, so where its own copy would be
+   the raw message byte for byte (a message with text, not a counted one,
+   which the copy decodes) it holds the raw message itself in the copy's
+   place. The raw message is rooted first, since making the object can
+   collect. */
+sp_Exception *sp_exc_new_for_ensure(const char *cls, const char *raw) {
+  SP_GC_ROOT_STR(raw);
+  sp_Exception *e = sp_exc_new_for_catch(cls, raw);
+  if (raw && raw[0] && !sp_cmsg_p(raw)) { e->msg = raw; sp_gc_wb((void *)e); }
+  return e;
+}
 /* Allocate a zeroed exception-subclass struct of `sz` bytes with the base
    {cls_name, parent_cls_name, msg} prefix set, for the degenerate catch path
    where a user subclass with ivars was raised without a carried object
