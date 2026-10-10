@@ -1,0 +1,36 @@
+An exception leaving a synchronize block reaches the rescue beside the outer ensure
+
+A Mutex#synchronize block and the loop of select! each run in a
+region of their own, which unlocks the mutex or puts the Array back
+when the block raises and then passes the exception on. With an
+ensure region around it, a begin's ensure asks two things before it
+hands the exception to that region: whether a begin with a rescue
+lies between the two, and whether the enclosing begin has rescue
+clauses of its own. Either way it raises the exception again, so the
+clauses are offered it first. The two block regions ask only the
+first. So
+
+    def locked(m)
+      m.synchronize { raise TypeError, "held" }
+    rescue TypeError => e
+      puts "rescued " + e.message
+    ensure
+      puts "outer ensure"
+    end
+
+prints `outer ensure` and ends on the TypeError uncaught, as it does
+with select! in place of synchronize: the clauses of the begin that
+has the ensure are passed by.
+
+The rule a begin's ensure follows is now one function,
+emit_ensure_exc_out, and the three kinds of region call it. A begin's
+ensure writes the C it wrote, and so does a block's region where a
+rescue lies between: it raises by class and message with the object
+it may hold left pending. Under a begin with clauses of its own it
+raises the same way, so the clause binds the object an ensure inside
+the block handed up.
+
+Nothing changes on the path with no exception, nor for a region with
+no ensure around it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
