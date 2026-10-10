@@ -3162,6 +3162,18 @@ int srange_member_builtin(Compiler *c, const char *name) {
          (!walks || (an_prog_never_gives("to_int", 0) && an_prog_never_gives("method_missing", 0) &&
                      an_prog_never_gives("<=", 0) && an_prog_never_gives("<", 0)));
 }
+/* May === of a String Range answer a boxed value by covering the String
+   it holds? Not where a box tagged as a handle is unsure, and not where
+   the program may have a Range#=== of its own: there the equality it was
+   written as stays. It stays as well in a program that may have an `each`
+   of its own (an_prog_never_gives): grep and grep_v ask this === of each
+   element, and over an Array they walk as the builtin does where CRuby
+   walks by the `each` the program gave it, so they would find a String
+   CRuby never reaches. */
+int srange_eqq_covers_boxed(Compiler *c) {
+  return g_strbuf_boxes != SB_BOXES_UNSURE && srange_member_builtin(c, "===") &&
+         an_prog_never_gives("each", 0);
+}
 /* A String method answering its receiver or nil (bop_share_self_answer:
    a bang method, an iterator given a block) called on a local that holds
    the shared handle (--share-strings: or an ivar, a global, a class
