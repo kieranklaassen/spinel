@@ -1,0 +1,48 @@
+An exception leaving an inner ensure reaches the rescue around it
+
+An ensure region whose body is done passes the exception it holds to
+the ensure region around it, unless a begin with a rescue lies between
+the two: then it raises the exception again, for that rescue. The
+begin whose body the inner region is a statement of was not counted:
+the frame of its body serves its rescue clauses and its ensure both,
+so no frame lies between. So
+
+    def go
+      begin
+        begin
+          raise TypeError, "deep"
+        rescue ArgumentError
+          puts "not reached"
+        ensure
+          puts "ensure 1"
+        end
+      rescue TypeError
+        puts "rescued"
+      ensure
+        puts "ensure 2"
+      end
+    end
+
+prints `ensure 1`, `ensure 2` and dies of the TypeError: the outer
+clauses are never offered it. The same with no rescue on the inner
+begin.
+
+A begin with rescue clauses now marks its ensure region while its
+body is emitted (EnsureCtx.rescued), and an inner region that finds
+the mark raises the exception again into the body's frame. The
+clauses are offered it there, and the ensure runs after them, taken
+or not.
+
+The exception is still handed on past the clauses where one of their
+tests could take an exception CRuby's would decline, since the
+hand-on is right for those (rescue_offers): where the program as
+written may give a class a `===` of its own, which a clause's test
+never calls (an_prog_never_gives); and, in a list with a bare clause,
+for a class the runtime does not know for a StandardError, which the
+bare clause's test takes.
+
+Nothing changes on the path with no exception. An exception that
+leaves an inner ensure for a begin whose clauses do not take it now
+pays for their tests, as one raised in that body does.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
