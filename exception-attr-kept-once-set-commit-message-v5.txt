@@ -1,0 +1,215 @@
+An attribute of an exception class with no initialize is kept once set
+
+    class Tagged < StandardError; attr_accessor :tag, :at; end
+    kept = []
+    60.times do |i|
+      s = +"m"
+      s << i.to_s
+      begin
+        raise Tagged, s
+      rescue Tagged => e
+        e.tag = "tag-#{i}"
+        e.at = [i, "a#{i}"]
+        kept << e
+      end
+    end
+    # --share-strings: 59 of the 60 read back wrong; CRuby: none
+
+A class of the program's under a builtin exception, with ivars and no
+initialize in its chain, has no constructor on its path, so the runtime
+builds it. With --share-strings a raise whose message is a String the
+program appends to builds the exception at the raise, to hold that
+String, and builds it as a plain exception of the base size: the arm
+typed to the class wrote its ivars past the end, in a plain run.
+
+Without the flag the same class was written past its end once an arm
+that names no class of the program had caught it. sp_exc_new_for_catch
+built it at the base size there too, and a method of the class called
+on the kept value stored its ivars beyond the object:
+
+    class Marked < StandardError
+      attr_reader :a, :b, :c
+      def mark!(a, b, c)
+        @a = a; @b = b; @c = c
+      end
+    end
+    kept = []
+    5.times do |i|
+      begin
+        raise Marked, "a#{i}"
+      rescue StandardError => e
+        kept << e
+      end
+    end
+    kept.each do |v|
+      next unless v.respond_to?(:mark!)
+      v.mark!("1" + v.message, "2" + v.message, "3" + v.message)
+    end
+    n = 0
+    100_000.times { |i| n += "x#{i}".size }
+    p n               # segmentation fault; CRuby: 588890
+
+An arm typed to its parent, where the parent is such a class too, built
+it at the parent's size, and the ivars the subclass adds were written
+past that.
+
+A begin with an ensure holds an exception that leaves through its
+rescue clauses, raised in a clause or matched by none, as its object
+until the ensure has run, and built it with sp_exc_new_for_catch too.
+Raised in a clause and caught afterwards by an arm typed to the class,
+29 of 30 read back wrong, without the flag.
+
+An ensure with no rescue clause, a begin's or a method's, makes the
+object of a raise that passes through it and holds it for the raise
+after its body, with that function again, and the arm typed to the
+class takes what it is handed:
+
+    class Wide < StandardError
+      attr_accessor :a, :b, :c, :d, :e, :f, :g, :h, :i, :j, :k, :l
+    end
+    def go
+      raise Wide, "wide"
+    ensure
+      $kept = [ArgumentError.new("kept 0"), ArgumentError.new("kept 1")]
+    end
+    begin
+      go
+    rescue Wide => x
+      x.a = -1; x.b = -2; x.c = -3; x.d = -4; x.e = -5; x.f = -6
+      x.g = -7; x.h = -8; x.i = -9; x.j = -10; x.k = -11; x.l = -12
+      puts x.a + x.l    # segmentation fault; CRuby: -13
+    end
+
+With four attributes the program is right in a plain run, by where
+the stores land, and faults under SPINEL_GC_STRESS=2; with two, in a
+loop that keeps the exceptions and raises through a begin's ensure,
+nothing faults and 30 of 30 read back wrong. Where a cause waits for
+the raise, such an ensure, a filter block's and a synchronize body's
+make the object as they catch it, with that function as well: raised
+under a rescue, 39 of 40.
+
+Built by `.new`, or by the rescue that catches a raise by its name, it
+had its own size, but sp_exc_new_sub_sized gave it the base exception's
+scan:
+
+    class ParseError < StandardError; attr_accessor :line, :ctx; end
+    rows = ->(n) { (0...n).map { |i| [i, "r#{i}"] } }
+    e = ParseError.new("m")
+    e.ctx = rows.(3)
+    20000.times { rows.(3) }
+    p e.ctx           # [1, "r1"]; CRuby: the three rows
+
+An ivar the program stored was never marked, and its value was freed
+under the exception in a plain run.
+
+One builder cures both. sp_exc_new_sub_ivars takes the class's own
+scan. The rescue has to know which class was raised, and all it holds
+is the name. The names of these classes stand in one table of the
+generated code (sp_xbn_name), and that code passes a class's row where
+it raises the class or builds it; the rescue then knows the class by
+one range test on the pointer (sp_exc_own_by_name), whatever the number
+of classes and the length of their names, and sp_user_exc_parent is not
+asked a second time. Where sp_exc_new_for_catch, sp_exc_caught_obj or
+sp_exc_ensure_obj would build the exception, a program that has such a
+class calls an entry of its own generated code in that function's place
+(sp_exc_catch_own, sp_exc_caught_own, sp_exc_ensure_own): a test that
+hands a row to the program's maker, out of line and cold, and anything
+else to the runtime's function, so that the code around the call stays
+what it was where nothing is raised. None of the three functions
+changes, and a name that is no row is built as it was.
+
+Where sp_exc_new_for_catch built such a class before, a message given
+as a frozen literal stays frozen (`e.message.frozen?`,
+`e.message << "x"` raising FrozenError): sp_exc_new_sub_caught is the
+same builder with that function's own test of the message and its
+root of the caller's message. It calls sp_exc_new_sub_ivars and holds
+no third copy of the body: with three, gcc 13 at the Makefile's flags
+stops inlining sp_msg_heapify into sp_exc_new in the threaded runtime,
+16 instructions more for every exception of a threaded program. In the
+unthreaded runtime gcc calls it out of line as it did, and clang 18
+does in both.
+
+Cost, in instructions under callgrind for one exception built, the
+program's C compiled by gcc 13 and then by clang 18 (x86-64, glibc;
+spinel and its runtime built by gcc 13 at the Makefile's flags under
+both), in a program that has such a class. What master ran right pays:
+a builtin exception caught by an arm 6 and 5, for the entry's test; 8
+and 5 where it leaves through an ensure with no rescue clause; 17 and
+20 where it is raised under a rescue and leaves through such an ensure;
+and a class the program stores nothing in, 4 and 4 where master built
+it at its own size (`.new`, the arm that names it), for one more
+argument, and 27 and 28 where an arm typed to a parent of the same kind
+catches a subclass raised by name, which is built as itself now. Around
+the last two, glibc's string compares count 22 to 66 more with gcc, and
+from 40 fewer to 2 more with clang, for the same calls (15,900,000 to
+19,800,000 of strcmp in 150,000 turns, the same on both sides): the
+class's name is a row of the table and no longer the literal, and
+strcmp and strncmp take their page-crossing path or not by the two
+addresses' offsets in their pages. An arm that names no class of the
+program builds such a class in 146 and 215 fewer. Where nothing is
+raised a program that has such a class runs what it did, by measure:
+of twenty-eight programs with an ensure, a rescue, a synchronize body
+or a filter block that nothing is raised through, twenty-six have such
+a class, and of those none costs more with gcc, and with clang
+twenty-four cost the same and two cost more, each at a rescue arm typed
+to such a class that is never taken, 2 instructions a turn (98 to 100)
+for a begin with a rescue typed to the class and an ensure, and 1 (76
+to 77) for a rescue typed to the parent of such a class: the arm's
+builder takes one more argument, the class's scan, and asks the table
+first where a class built by name descends from the arm's. Compiling a
+program that only defines such classes runs 16,200 to 19,200 more
+instructions a class (callgrind of `spinel -c`, spinel built by gcc 13
+at the Makefile's flags): 1.3% more at 300 of them, 0.6% at 1,000, 0.4%
+at 2,000. A class with an ivar that is no such class is asked once
+what it is: 292 instructions for one that is no exception, 1,148 for an
+exception class with an initialize of its own. A program with no class
+of its own compiles as it did, to within 340 instructions and glibc's
+string compares.
+
+A program without such a class emits the C it did. sp_exc_new_for_catch
+does not change, and sp_exc_new_sub_sized stays, with the base scan, for
+a class with an initialize of its own, whose C does not change either.
+A builtin exception the program reopens is not such a class.
+
+Not here: an attribute nothing has stored. The struct is zeroed, as it
+was, and zero is not nil in every slot: one the compiler types as an
+Integer or as a boxed value reads 0 until it is stored, where CRuby
+reads nil. `p ParseError.new("m").line` prints 0 before this change
+and after it. Where the object was built at the base size that read
+went past its end and printed what lay there; it reads the object's own
+zeroed slot now, and a program that crashed ahead of such a read
+reaches it. Seeding nil is a change of its own: CRuby runs methods of
+the program that the compiler does not (a `to_ary` under a multiple
+assignment), and where one of them stores a zero the zeroed slot is
+CRuby's answer.
+
+Nor whether an attribute was assigned: a zeroed slot of those two
+kinds answers a presence read as assigned.
+`p ParseError.new("m").instance_variables` prints [:@line, :@ctx]
+before this change and after it, where CRuby prints [].
+
+Nor a class read off a value (`raise x.class, "re"`) that an arm naming
+no class of the program catches. Its name reaches the raise as a copy
+(sp_exc_class_name), which is no row, and the arm still builds it at
+the base size; the arm typed to the class builds it as itself, unless
+an ensure held it first: the ensure builds it at the base size, as
+before this change, and the arm takes that object. And a subclass
+caught by an arm typed to a parent that has a method of its own and no
+attribute, or by a bare arm typed to the parent, is still built at the
+parent's size, as before: ivars a method of the subclass stores go past
+the object.
+
+Nor `cause: nil` on a raise under a rescue that leaves through a
+method's ensure: `e.cause` is the exception that was in flight, where
+CRuby gives nil, for such a class as for a builtin exception.
+
+Tests: test/exception_attribute_without_initialize.rb,
+test/exception_attribute_marked.rb (marked `# spinel: gc-stress`),
+test/exception_attribute_parent_arm.rb,
+test/exception_attribute_ensure_clause.rb,
+test/share_strings_exception_attribute.rb (run by share-strings-test
+too), and one that passes before this change too:
+test/exception_attribute_builtin_reopened.rb (a reopened builtin
+exception, built as it was)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
