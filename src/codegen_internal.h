@@ -589,8 +589,12 @@ void emit_line_directive(Compiler *c, int id, Buf *b);
    declared while g_ret_type is the INLINE's, and the block spliced at its
    yield then defers a `return` belonging to the OUTER method into it. Reading
    g_ret_type at the store site therefore asked the wrong function whether to
-   box, and a String went into an sp_RbVal slot unboxed. */
-typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; int rescue_base; } EnsureCtx;
+   box, and a String went into an sp_RbVal slot unboxed.
+   rescued: the region is a begin with rescue clauses and its body is being
+   emitted, so an exception that leaves the body is the clauses' before it
+   is the ensure's: 1, or 2 where one of them is a bare clause (see
+   rescue_offers in codegen_stmt.c). */
+typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; int rescue_base; int rescued; } EnsureCtx;
 extern EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 extern int       g_ensure_depth;
 
