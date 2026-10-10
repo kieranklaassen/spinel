@@ -1,0 +1,91 @@
+Delta for the reader: the replace piece, fifth cut (with --share-strings a plain write of the frozen literal keeps master's C).
+
+17793d006d90 (one commit on 090969e7759b; body -v3, message -v3; read NOT READY on one point: a cost on programs master now runs right) is superseded and stays pushed. The new head is f0dd40d9b2676e4dac8ecbbc265404038d1fa35a, tree d88027eb9f4290cc1cfcfcc175e3acd3aae9d786, one commit on master 4689b503c791cd556b80ece75735d6e1beadf837, the tip by my own ls-remote when it was cut (23:22 UTC, 10-09). Texts: body -v4, message -v4, an OLD/NEW file for each (against -v3). The title, the test and its .expected are as they were (the same blobs).
+
+THE CODE. The whole delta against the fourth cut replayed on the same tip (a clean merge, tree 58eaadfc11a3):
+
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -16222,13 +16222,16 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
+    String's copy below its top, where the read can be the source's value
+    (strbuf_slot_ref says which reads are a copy)? A write counts as one:
+    its value is its own slot read back, a copy where that slot is a
+-   shared String, and no read node stands for it. Left out are the
+-   children whose value is never the node's: a condition, the left of
+-   `&&` (it answers only where it is nil or false), a when's conditions,
+-   an in's pattern, an ensure clause, every statement of a sequence but
+-   its last (a `break` before it gives a loop its value, which the loop
+-   holds in a frame slot), and what defined? is asked about. Every other
+-   child counts, and the walk ends with the tree. */
++   shared String, and no read node stands for it. With --share-strings a
++   plain write of the frozen literal itself does not: the slot takes that
++   literal's own handle (strbuf_new_func), and what is read back is the
++   literal's bytes. Left out are the children whose value is never the
++   node's: a condition, the left of `&&` (it answers only where it is nil
++   or false), a when's conditions, an in's pattern, an ensure clause,
++   every statement of a sequence but its last (a `break` before it gives
++   a loop its value, which the loop holds in a frame slot), and what
++   defined? is asked about. Every other child counts, and the walk ends
++   with the tree. */
+ static int replace_source_reads_copy(Compiler *c, int v) {
+   const NodeTable *nt = c->nt;
+   char hs[1024];
+@@ -16238,7 +16241,10 @@ static int replace_source_reads_copy(Compiler *c, int v) {
+   int nr = nt_num_refs(nt, v), na = nt_num_arrs(nt, v);
+   if ((nr == 0 && na == 0) || k == NK_ConstantPathNode) return strbuf_slot_ref(c, v, hs, sizeof hs);
+   HolderRef wh;
+-  if (holder_kind_of(k) != HK_NONE && holder_of_node(c, v, &wh) && (wh.r.kind == RK_STRBUF || wh.r.share)) return 1;
++  int lit = repr_share_rule(c) && (k == NK_LocalVariableWriteNode || k == NK_InstanceVariableWriteNode ||
++            k == NK_ClassVariableWriteNode || k == NK_GlobalVariableWriteNode || k == NK_ConstantWriteNode) &&
++            share_frozen_literal(c, nt_ref(nt, v, "value"));
++  if (!lit && holder_kind_of(k) != HK_NONE && holder_of_node(c, v, &wh) && (wh.r.kind == RK_STRBUF || wh.r.share)) return 1;
+   int cond = nt_ref(nt, v, "predicate"), ens = nt_ref(nt, v, "ensure_clause");
+   int left = k == NK_AndNode ? nt_ref(nt, v, "left") : -1, pat = k == NK_InNode ? nt_ref(nt, v, "pattern") : -1;
+   for (int i = 0; i < nr; i++) {
+
+How to read it. The fourth cut counted every write as a read of its own variable where that variable holds a String two names hold or a handle. With --share-strings, master (pull requests 8268 and 8269) gives a variable written with a frozen literal that literal's own handle, so nothing is copied when the write's value is read back, and those programs are right on master now. `lit` is true only under the share rule, only for a plain write (a local, an instance variable, a class variable, a global, a constant; not `||=`, `&&=`, an operator write), and only where its value is what master's own share_frozen_literal calls a frozen literal: such a write is not counted, and the walk goes on into its value, which reads nothing.
+
+THE INVERTED TEST: what the lines release is master's C, and nothing else moves.
+- This head against the fourth cut on the tip, by the generated C, 222 probe programs. Without the flag: 216 equal, 6 build on neither, 0 differ. With --share-strings: 196 equal, 2 build on neither, 24 differ, and each of the 24 is the bare tip's C under the flag, byte for byte. The corpus, 6,811 programs: master's C in all but the three that print the path of the build's own directory.
+- The 24 by answer (17 of them run by answer, gcc and clang at levels 0, 1 and 2, with the flag): 15 are right in every cell on the bare tip and here: `t = "abc"` alone, as one side of a choice, right of `false ||` and of `nil ||`, in a `break`, under an `if`, beside an Integer, inside an `||`, and written to a global, once and twice. Two are `begin; t = "abc"; end`: wrong in every run at every level on the bare tip and here, without the flag too; that fault is not the collector's, and the body's "Not in this change" names it. The other seven are the cost programs below.
+- What stays cured with the flag (wrong at level 2 on the bare tip with both compilers, right in every cell here): `t ||= "none"`, `t = w` (another variable's String), `t += ""`, and with an instance variable `@t ||= "none"` and `@x = t`. Without the flag nothing is released: `t = "abc"`, as one side of a choice, right of `false ||` and `nil ||`, beside an Integer, inside an `||`, `t ||= "none"`, `t = w`, `t &&= "abc"`, `(t = "abc"; t)` and `u = t = "abc"` are wrong at level 2 on the bare tip and right here.
+- The cost that is cut, with --share-strings (callgrind, 200,000 statements; the bare tip | the fourth cut | this head, with the instructions a statement):
+  s.replace(t = "abc")               gcc 68,478,804 | 72,879,411 (+22) | 68,478,790 (+0); clang 75,457,116 | 78,257,743 (+14) | 75,457,129 (+0)
+  k ? (t = "abc") : "none"           gcc 68,478,804 | 72,879,425 (+22) | 68,478,804 (+0); clang 75,457,116 | 78,257,730 (+14) | 75,457,116 (+0)
+  while r; break(t = "abc"); end     gcc 79,280,718 | 82,281,335 (+15) | 79,280,718 (+0); clang 79,459,191 | 82,859,805 (+17) | 79,459,191 (+0)
+  false || (t = "abc")               gcc 78,478,802 | 81,679,410 (+16) | 78,478,788 (+0); clang 78,657,278 | 82,057,878 (+17) | 78,657,264 (+0)
+  k ? (t = "abc") : 5                gcc 78,478,788 | 81,679,424 (+16) | 78,478,802 (+0); clang 78,657,264 | 82,057,892 (+17) | 78,657,278 (+0)
+  while true; break(t = "abc"); end  gcc 79,280,707 | 82,281,324 (+15) | 79,280,707 (+0); clang 79,459,180 | 82,859,794 (+17) | 79,459,180 (+0)
+  (t = "abc" if k)                   gcc 71,679,300 | 74,679,931 (+15) | 71,679,314 (+0); clang 76,857,773 | 80,258,406 (+17) | 76,857,787 (+0)
+- Three sources that master runs right with the flag still take the root (the same columns):
+  t &&= "abc"                        gcc 68,878,803 | 72,679,411 (+19) | 72,679,411 (+19); clang 75,857,116 | 78,857,718 (+15) | 78,857,718 (+15)
+  u = t = "abc"                      gcc 78,878,620 | 82,079,255 (+16) | 82,079,255 (+16); clang 83,456,933 | 86,257,561 (+14) | 86,257,561 (+14)
+  (t = "abc"; t)                     gcc 68,478,790 | 72,879,425 (+22) | 72,879,425 (+22); clang 75,457,102 | 78,257,730 (+14) | 78,257,730 (+14)
+  Your ruling's cut is the plain write whose value is the literal itself, and that is what is cut. These three are not that: an and-write; a plain write whose value is another write; a sequence whose last statement reads the variable. What each reads back is the literal's too, so they are a cost on right programs, stated in the body (16 to 22 with gcc, 14 to 15 with clang) and in the message. I did not widen the cut past the ruling; say so if they are to be cut too.
+
+T1, THE COST FIGURE. Measured again on the tip, a loop with a run-time condition among the programs (`while r; break t; end`, `r` set in the loop: 14 with gcc and 14 with clang; it is a row of the table now). Over every program that takes the root, without the flag and with it: 10 to 22 instructions a statement with gcc, 7 to 20 with clang. The 22 is `(t = "abc"; t)` with the flag; without the flag the dearest is `t &&= "abc"`, 20. Body line 5 and the message's last cost sentence say 10 to 22 and 7 to 20.
+
+THE PROOF, BY NAME.
+- share_frozen_literal: the piece takes its node test and nothing else (a StringNode marked frozen; an interpolation of literal parts alone marked frozen; `freeze`, `-@` or `dedup` of one).
+- strbuf_new_func is master's choice of handle for a value written into a shared slot: for such a literal, sp_String_new_shared, which answers the literal's own handle; a read of that slot is the literal's bytes (a frozen handle is read where it stands), so no String is made between the write and the copy. The piece does not call it; its comment names it.
+- sh_route_why (the "sole" check) and emit_strbuf_route: the piece calls neither, and its proof reads neither. Whether a read is a copy it asks of strbuf_slot_ref; what a write's variable holds it asks of holder_of_node.
+- A String read through a boxed value's to_s (`s.replace(v.to_s)`, pull request 8290) is a call: master's own line roots it, the second test is never asked, and the C is the bare tip's without the flag and with it.
+- Instance-variable holders (pull request 8279), re-read on the bare tip: `@t ||= "none"` at the top level is master's C and right without the flag, wrong at level 2 with it and cured; `@x = t` is right without the flag and pays there (the body's third family), wrong at level 2 with the flag and cured; `@t = "abc"` is master's C in both modes.
+
+THE TEST ON THE BARE TIP, by hand. Right in a plain run and at level 1. At level 2, gcc and clang alike: without the flag 300 150 100 300 300 300 150 150 300 150 300 0, eleven counts that are not 0, 2,500 of 3,300; with --share-strings 300 150 100 300 300 300 150 150 300 150 0 0, ten counts, 2,200 of 3,300. The body says both. The lead examples: 4 of 300 and 1 of 300 in a plain run, the three poison lines at level 2.
+
+NO CELL LOST, NO RAISE MADE A WRONG LINE. 170 probe programs without the flag and the same 170 with it, the bare tip against this head, gcc and clang at levels 0, 1 and 2: no cell that is right on the tip is lost, no raise or stop becomes a wrong line; 94 cells gained without the flag, 82 with it.
+
+"NOT IN THIS CHANGE" gains two bullets, both read on the bare tip: the attribute or-write (`s.replace(o.name ||= "none")`: wrong at level 2 on both, the same C) and the `begin` block whose only statement is such a write (wrong in every run on both).
+
+OWN CHECKS on this head, built from nothing, against the bare tip 4689b503c791 built from nothing
+- `ruby tools/gate.rb check`, the commit staged: exit 0;
+- the test, seven lanes, gcc and clang, plain and --share-strings: right in every one here; the bare tip ok/ok/ok/rc0/ok/ok/ok (wrong at level 2 with exit 0) with both compilers in both modes;
+- corpus: 6,811 programs, the C of 3 differs (the three that print the path of the build's own directory);
+- optcarrot: checksum 59662, C byte-identical;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- compile time at 1,000 and 2,000 lines, both sides in one run: in the body's gate paragraph; new there, with the flag, `s.replace(t = "abc")`, which keeps master's C: 708,894,410 and 709,786,419 (+0.13%) at 1,000, 1,409,951,970 and 1,411,735,979 (+0.13%) at 2,000.
+
+SIDE FINDS, recorded and not taken (master's C on both sides): `s.replace(@t ||= "none")` inside a method, over an instance variable's String two names hold, is wrong in every run without the flag; `s.replace(o.name = "abc")` does not build.
+
+MASTER'S MOVE SINCE. The tip by my own ls-remote at 01:09 UTC, 10-10: 2b0ebc0a6bfd513ea869fc48eeb0bfce0c03aa66 (inline RBS signatures, pull request 8184; pull requests 8296, 8299 and 8300; one commit on a modifier rescue). From 4689b503c791 to it the move touches no function of the piece (str_mutate_reassign_arms, replace_source_reads_copy, replace_source_may_be_fresh) and none its proof reads (operand_may_allocate, strbuf_slot_ref, repr_of, unwrap_parens, any_class_defines, comp_ntype, holder_kind_of, holder_of_node, share_frozen_literal, strbuf_new_func, repr_share_rule, emit_strbuf_value); the merge into it: exit status 0, tree 81b19d74a79f98483f463466a69a1b87a8977b03. So the head stands on 4689b503c791 by the rule. A short round on that merge besides, both sides built from nothing: the test is right in its 28 lanes on the merge and ok/ok/ok/rc0/ok/ok/ok on the bare tip in both modes; 62 probe programs by answer without the flag and the same 62 with it (the write probes, the lead examples), gcc and clang at levels 0, 1 and 2: no cell lost, no raise made a wrong line.

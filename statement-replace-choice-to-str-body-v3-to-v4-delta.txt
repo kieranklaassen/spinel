@@ -1,0 +1,138 @@
+The replace piece: body -v3 to -v4, paragraph by paragraph.
+
+OLD:
+**A fix with a cost.** A String replaced from an object that answers `to_str`, or from a String two names hold where it is one side of a choice or is written to in the source, came out as freed memory, in a plain run when the Strings are large. The cost is one root, 10 to 17 instructions a statement with gcc and 10 to 20 with clang, on `replace` as a statement whose source runs no call and either is no String or reads or writes a String two names hold below its top, where that can be the source's value. Sources of three families were right on master and pay it; they are named under the table with their reasons.
+
+NEW:
+**A fix with a cost.** A String replaced from an object that answers `to_str`, or from a String two names hold where it is one side of a choice or is written to in the source, came out as freed memory, in a plain run when the Strings are large. The cost is one root, 10 to 22 instructions a statement with gcc and 7 to 20 with clang, on `replace` as a statement whose source runs no call and either is no String or reads or writes a String two names hold below its top, where that can be the source's value. Sources of three families were right on master and pay it; they are named under the table with their reasons.
+
+----
+
+OLD:
+- the source is a String and a read below its top is a copy. `strbuf_slot_ref`, master's own answer to "is this read a copy", is asked of each read whose value can be the source's. A write counts as a read of its own variable where that holds such a String (`holder_of_node` says so): its value is the variable read back, and no read node stands for it. The reads whose value never is the source's are left out: a condition, the left of `&&`, a `when`'s conditions, an `in`'s pattern, an `ensure` clause, every statement of a sequence but its last (a `break` before the last gives a loop its value, and the loop holds that in a frame slot), and what `defined?` is asked about.
+
+NEW:
+- the source is a String and a read below its top is a copy. `strbuf_slot_ref`, master's own answer to "is this read a copy", is asked of each read whose value can be the source's. A write counts as a read of its own variable where that holds such a String (`holder_of_node` says so): its value is the variable read back, and no read node stands for it. With `--share-strings` a plain write of a frozen literal (`t = "abc"`) is not counted: master gives the variable that literal's own handle (`share_frozen_literal` says which values those are), what is read back is the literal's bytes, and the statement keeps master's C. The reads whose value never is the source's are left out: a condition, the left of `&&`, a `when`'s conditions, an `in`'s pattern, an `ensure` clause, every statement of a sequence but its last (a `break` before the last gives a loop its value, and the loop holds that in a frame slot), and what `defined?` is asked about.
+
+----
+
+OLD:
+| `t \|\| "none"` | 106,876,162 to 110,276,163 (17) | 107,074,626 to 111,074,625 (20) |
+| `k ? t : "none"` | 107,476,161 to 110,276,163 (14) | 107,474,626 to 110,474,625 (15) |
+| `o`, an object whose `to_str` makes a String | 100,293,716 to 103,296,386 (15) | 100,291,827 to 103,094,494 (14) |
+| `x = t` | 107,879,423 to 110,679,424 (14) | 107,877,916 to 110,877,915 (15) |
+| `t \|\|= "none"` | 107,483,776 to 110,283,776 (14) | 107,878,170 to 109,878,169 (10) |
+| `k && t` | 71,073,360 to 73,875,305 (14) | 69,851,793 to 72,653,735 (14) |
+| `n \|\|= t` | 72,075,338 to 74,877,282 (14) | 70,653,828 to 73,455,771 (14) |
+| `false \|\| t` | 71,074,368 to 73,876,318 (14) | 69,852,845 to 72,654,789 (14) |
+| `k ? t : 5` | 71,074,368 to 73,876,318 (14) | 69,852,859 to 72,654,803 (14) |
+| `while true; break t; end` | 71,476,274 to 74,278,217 (14) | 70,254,762 to 73,056,703 (14) |
+| `begin; t; end` | 110,477,087 to 113,277,092 (14) | 111,075,562 to 113,875,563 (14) |
+| `begin; t; ensure; z; end` | 126,677,665 to 129,277,668 (13) | 131,078,224 to 134,278,224 (16) |
+| `begin; a; rescue; t; end` | 76,877,224 to 79,479,449 (13) | 78,061,560 to 81,463,780 (17) |
+| `begin; a; rescue; b; else; t; end` | 126,302,932 to 128,902,935 (13) | 126,903,529 to 129,903,529 (15) |
+| `(t if k)` | 110,477,073 to 113,277,078 (14) | 111,075,562 to 113,875,563 (14) |
+| `if z then "x" elsif k then t else "y" end` | 110,477,087 to 113,277,092 (14) | 111,075,562 to 113,875,563 (14) |
+| `case i; in Integer then t; end` | 110,484,756 to 113,284,756 (14) | 111,079,248 to 113,879,249 (14) |
+| `$g = t` | 108,081,138 to 110,481,139 (12) | 107,878,495 to 110,679,622 (14) |
+| `@x = t` | 108,087,040 to 110,488,175 (12) | 107,882,656 to 110,682,656 (14) |
+| a boxed String, where a class defines `to_str` | 62,485,614 to 65,286,234 (14) | 61,665,314 to 64,465,921 (14) |
+| `o`, whose `to_str` answers a String it holds | 60,060,981 to 62,863,811 (14) | 60,441,707 to 63,244,534 (14) |
+| `a` | 62,056,113, the same | 62,439,113, the same |
+| `x = a` | 62,456,646, the same | 62,839,628, the same |
+| `a \|\|= "none"` | 61,270,260, the same | 61,849,253, the same |
+| `k ? a : b` | 62,056,127, the same | 62,439,099, the same |
+| `case k when true then a else b end` | 62,056,127, the same | 62,439,113, the same |
+| `k && a` | 62,061,307, the same | 62,640,413, the same |
+| `begin; a; end` | 65,056,758, the same | 65,639,757, the same |
+| `@@a` | 56,062,761, the same | 54,842,821, the same |
+
+NEW:
+| `t \|\| "none"` | 108,276,051 to 111,676,052 (17) | 108,474,466 to 112,474,465 (20) |
+| `k ? t : "none"` | 108,876,050 to 111,676,052 (14) | 108,874,466 to 111,874,465 (15) |
+| `o`, an object whose `to_str` makes a String | 100,293,578 to 103,296,234 (15) | 100,291,617 to 103,094,270 (14) |
+| `x = t` | 109,279,326 to 112,079,327 (14) | 109,277,742 to 112,277,741 (15) |
+| `t \|\|= "none"` | 108,883,656 to 111,683,656 (14) | 109,278,037 to 111,278,036 (10) |
+| `t = "abc"` | 173,897,060 to 176,497,313 (13) | 179,552,369 to 182,752,710 (16) |
+| `k && t` | 71,073,240 to 73,875,171 (14) | 69,851,592 to 72,653,520 (14) |
+| `n \|\|= t` | 72,075,204 to 74,877,162 (14) | 70,653,685 to 73,455,588 (14) |
+| `false \|\| t` | 71,074,248 to 73,876,198 (14) | 69,852,676 to 72,654,620 (14) |
+| `k ? t : 5` | 71,074,234 to 73,876,198 (14) | 69,852,662 to 72,654,620 (14) |
+| `while true; break t; end` | 71,476,154 to 74,278,083 (14) | 70,254,633 to 73,056,506 (14) |
+| `while r; break t; end` | 71,676,140 to 74,478,097 (14) | 70,254,619 to 73,056,574 (14) |
+| `begin; t; end` | 111,876,962 to 114,676,981 (14) | 112,475,374 to 115,275,389 (14) |
+| `begin; t; ensure; z; end` | 128,077,549 to 130,677,557 (13) | 132,878,118 to 135,878,118 (15) |
+| `begin; a; rescue; t; end` | 76,877,133 to 79,479,358 (13) | 78,061,455 to 81,463,675 (17) |
+| `begin; a; rescue; b; else; t; end` | 127,702,847 to 130,302,850 (13) | 128,303,430 to 131,303,430 (15) |
+| `(t if k)` | 111,876,976 to 114,676,981 (14) | 112,475,388 to 115,275,389 (14) |
+| `if z then "x" elsif k then t else "y" end` | 111,876,962 to 114,676,981 (14) | 112,475,374 to 115,275,389 (14) |
+| `case i; in Integer then t; end` | 111,884,614 to 114,684,614 (14) | 112,479,065 to 115,279,066 (14) |
+| `$g = t` | 109,480,995 to 111,881,010 (12) | 109,279,461 to 112,079,475 (14) |
+| `@x = t` | 109,488,012 to 111,888,005 (12) | 109,282,527 to 112,082,459 (14) |
+| a boxed String, where a class defines `to_str` | 62,485,444 to 65,286,078 (14) | 61,665,081 to 64,465,702 (14) |
+| `o`, whose `to_str` answers a String it holds | 60,060,845 to 62,863,675 (14) | 60,441,558 to 63,244,385 (14) |
+| `a` | 62,056,016, the same | 62,438,993, the same |
+| `x = a` | 62,456,535 and 62,456,521 (0) | 62,839,508 and 62,839,494 (0) |
+| `a \|\|= "none"` | 61,270,154, the same | 61,849,088, the same |
+| `k ? a : b` | 62,056,016, the same | 62,438,993, the same |
+| `case k when true then a else b end` | 62,056,002 and 62,056,016 (0) | 62,438,979 and 62,438,993 (0) |
+| `k && a` | 62,061,173 and 62,061,187 (0) | 62,640,198 and 62,640,212 (0) |
+| `begin; a; end` | 65,056,661, the same | 65,639,637, the same |
+| `@@a` | 56,062,641 and 56,062,627 (0) | 54,842,647 and 54,842,633 (0) |
+
+----
+
+OLD:
+`t` is a String two names hold, `a` and `b` Strings one local holds, `k` and `z` booleans, `n` nil. The first five were wrong on master at `SPINEL_GC_STRESS=2`. The other rows that take the root were right. They are examples, not a list: the sources that pay are of three families, by what the emitter did with the read, which the tree does not show:
+
+NEW:
+`t` is a String two names hold, `a` and `b` Strings one local holds, `k` and `z` booleans, `r` a boolean set in the loop, `n` nil. The first six were wrong on master at `SPINEL_GC_STRESS=2`. The other rows that take the root were right. They are examples, not a list: the sources that pay are of three families, by what the emitter did with the read, which the tree does not show:
+
+----
+
+OLD:
+A write to `t` in place of the read pays the same where master ran it right: in a loop's `break`, and in the forms run ahead (`(t = "abc" if k)`).
+
+NEW:
+A write to `t` in place of the read pays the same where master ran it right: in a loop's `break`, and in the forms run ahead (`(t = "abc" if k)`). With `--share-strings` a plain write of a frozen literal keeps master's C in each of those places, and three sources beside it that master ran right there take the root, 16 to 22 instructions a statement with gcc and 14 to 15 with clang: `t &&= "abc"`, `u = t = "abc"` and `(t = "abc"; t)`. What they read back is the literal's too; the cut is made only where the write is a plain one and its value is the literal itself.
+
+----
+
+OLD:
+A source that is no String at all (`s.replace(1)`) raises ahead of the root. Where a row says "the same", the two counts are equal: the generated C is master's.
+
+NEW:
+A source that is no String at all (`s.replace(1)`) raises ahead of the root. Where a row says "the same" the two counts are equal, and where it gives two with (0) they differ by 14 instructions, less than two runs of one binary differ by here: the generated C is master's in both.
+
+----
+
+OLD:
+No program under `test/`, `benchmark/` and `packages/*/test/` has such a statement: the generated C of all 6,764 is master's (three print the path of the build's own directory and differ in that alone), and optcarrot's is byte-identical.
+
+NEW:
+No program under `test/`, `benchmark/` and `packages/*/test/` has such a statement: the generated C of all 6,811 is master's (three print the path of the build's own directory and differ in that alone), and optcarrot's is byte-identical.
+
+----
+
+OLD:
+`test/string_replace_choice_to_str_root.rb` replaces through eleven such sources and counts the Strings that came out wrong: `t || "x"`, `c ? t : "x"`, a `case`, `@t || "x"`, an object in a local and in an instance variable, a boxed value, `c ? o : "x"`, and three writes, `w ||= "x"`, `c ? (w ||= "x") : "y"` and `w = "abc"`. A twelfth count is for four sources something else holds (`a`, `c ? a : "x"`, `a || "x"`, and `t` alone, which master roots). On master 090969e77 (gcc and clang) it is right in a plain run and at level 1, and counts 2,500 of its 3,300 wrong at level 2 with exit 0 (the others take a literal, or a String a local holds); the twelfth count is 0 of 1,200. With this change it prints its `.expected` in the seven lanes run here (plain, level 1, level 1 with the verifier, level 2, `SPINEL_GC_MINOR=0`, `=1`, and `=1` with `SPINEL_GC_VERIFY_GEN=1` at level 1), gcc and clang, and the same with `--share-strings`. It is registered for the stress lanes by its header line (`# spinel: gc-stress`).
+
+NEW:
+`test/string_replace_choice_to_str_root.rb` replaces through eleven such sources and counts the Strings that came out wrong: `t || "x"`, `c ? t : "x"`, a `case`, `@t || "x"`, an object in a local and in an instance variable, a boxed value, `c ? o : "x"`, and three writes, `w ||= "x"`, `c ? (w ||= "x") : "y"` and `w = "abc"`. A twelfth count is for four sources something else holds (`a`, `c ? a : "x"`, `a || "x"`, and `t` alone, which master roots). On master 4689b503c (gcc and clang) it is right in a plain run and at level 1, and counts 2,500 of its 3,300 wrong at level 2 with exit 0 (the others take a literal, or a String a local holds); the twelfth count is 0 of 1,200. With `--share-strings` its count for `w = "abc"` is 0 on master too, 2,200 of 3,300: that source keeps master's C there. With this change it prints its `.expected` in the seven lanes run here (plain, level 1, level 1 with the verifier, level 2, `SPINEL_GC_MINOR=0`, `=1`, and `=1` with `SPINEL_GC_VERIFY_GEN=1` at level 1), gcc and clang, and the same with `--share-strings`. It is registered for the stress lanes by its header line (`# spinel: gc-stress`).
+
+----
+
+OLD:
+(nothing: the passage is new)
+
+NEW:
+- An or-write through an attribute, `s.replace(o.name ||= "none")` where the attribute's String is one two names hold: wrong at level 2, with the same C. The source is neither a call nor a write of a variable; what it reads back is the attribute's.
+- A `begin` block whose only statement is such a write (`s.replace(begin; t = "abc"; end)`, `begin; t ||= "none"; end`): the receiver is wrong in every run, at every level, on master and here; the root this change adds does not reach that fault.
+
+----
+
+OLD:
+Run here on this commit on master 090969e77, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (master is wrong at `SPINEL_GC_STRESS=2` with exit 0; this change is right in every one); `ruby tools/gate.rb check`; the generated C of the 6,764 other programs, unchanged; optcarrot, checksum 59662, its C byte-identical; `make share-strings-test` and `make int-min-test`, both pass; the compiler's own instructions over 1,000 and 2,000 lines of one statement, before and after: `s.replace(a)`, 482,966,588 and 483,122,515 (+0.03%) at 1,000 and 959,819,762 and 960,131,689 (+0.03%) at 2,000; `s.replace(c ? a : "x")`, where each side of the choice is asked whether it is a copy and the C stays master's, 882,232,524 and 884,602,465 (+0.27%) and 1,763,469,043 and 1,768,208,984 (+0.27%); the same over two locals, `c ? a : b`, 898,592,407 and 901,631,343 (+0.34%) and 1,796,548,766 and 1,802,626,702 (+0.34%), and over five in a `case`, 1,819,676,821 and 1,827,893,734 (+0.45%) and 3,639,817,957 and 3,656,251,870 (+0.45%), the dearest measured of the pairs that keep master's C; `s.replace(x = a)`, where the write is asked for its variable, 10,677,690,721 and 10,679,731,657 (+0.02%) and 41,355,346,180 and 41,359,428,116 (+0.01%); `s.replace(t || "x")`, which gains the root, 631,470,502 and 639,475,330 (+1.27%) and 1,258,117,258 and 1,274,242,011 (+1.28%); `s.replace(a + k)`, which master's test roots, 1,076,727,076 and 1,076,726,988 (-88 instructions).
+
+NEW:
+Run here on this commit on master 4689b503c, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (master is wrong at `SPINEL_GC_STRESS=2` with exit 0; this change is right in every one); `ruby tools/gate.rb check`; the generated C of the 6,811 other programs, unchanged; optcarrot, checksum 59662, its C byte-identical; `make share-strings-test` and `make int-min-test`, both pass; the compiler's own instructions over 1,000 and 2,000 lines of one statement, before and after: `s.replace(a)`, 485,392,700 and 485,548,690 (+0.03%) at 1,000 and 964,615,769 and 964,927,759 (+0.03%) at 2,000; `s.replace(c ? a : "x")`, where each side of the choice is asked whether it is a copy and the C stays master's, 886,468,433 and 888,866,429 (+0.27%) and 1,771,751,846 and 1,776,547,842 (+0.27%); the same over two locals, `c ? a : b`, 902,936,275 and 906,003,286 (+0.34%) and 1,805,189,287 and 1,811,323,298 (+0.34%), and over five in a `case`, 1,826,901,347 and 1,835,195,361 (+0.45%) and 3,654,263,880 and 3,670,851,894 (+0.45%), the dearest measured of the pairs that keep master's C; `s.replace(x = a)`, where the write is asked for its variable, 10,704,429,864 and 10,706,477,875 (+0.02%) and 41,456,767,056 and 41,460,863,067 (+0.01%); `s.replace(t || "x")`, which gains the root, 634,415,016 and 642,429,833 (+1.26%) and 1,263,752,806 and 1,279,891,087 (+1.28%); `s.replace(a + k)`, which master's test roots, 1,081,224,169 and 1,081,224,181 (+12 instructions); and with `--share-strings`, `s.replace(t = "abc")`, which keeps master's C, 708,894,410 and 709,786,419 (+0.13%) and 1,409,951,970 and 1,411,735,979 (+0.13%).

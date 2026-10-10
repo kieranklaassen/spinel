@@ -1,0 +1,29 @@
+The replace piece: commit message -v3 to -v4, line by line.
+
+OLD:
+(nothing: the passage is new)
+
+NEW:
+With --share-strings a plain write of a frozen literal
+(`t = "abc"`) is not counted: the variable takes the literal's own
+handle (share_frozen_literal), and the C is as it was.
+
+----
+
+OLD:
+read pays the same in a loop's `break` and in the forms run ahead.
+
+NEW:
+read pays the same in a loop's `break` and in the forms run ahead;
+with --share-strings so do `t &&= "abc"`, `u = t = "abc"` and
+`(t = "abc"; t)`, which were right there.
+
+----
+
+OLD:
+whose to_str answers a String it holds. The root is 10 to 17
+instructions a statement with gcc and 10 to 20 with clang.
+
+NEW:
+whose to_str answers a String it holds. The root is 10 to 22
+instructions a statement with gcc and 7 to 20 with clang.
