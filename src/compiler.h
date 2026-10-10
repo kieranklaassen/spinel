@@ -1369,6 +1369,10 @@ int comp_defined_guard_false(Compiler *c, int pred);
 int comp_defined_guard_true(Compiler *c, int pred);
 int comp_defined_early(Compiler *c, int pred, const char **early, int cap);
 
+/* desugar_engine_branches settled a test and changed the node table: code
+   CRuby may run is not in it (analyze_desugar.c) */
+extern int g_engine_decided;
+
 /* Classes. */
 ClassInfo *comp_class_new(Compiler *c, const char *name, int def_node);
 int        comp_class_index(Compiler *c, const char *name);   /* -1 if none */

@@ -1,0 +1,57 @@
+1
+0
+1
+0
+0
+1
+RangeError: can't convert 1+1i into Integer
+0
+1
+0
+1
+0
+1
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of false into Integer
+TypeError: no implicit conversion of nil into Integer
+1
+0
+0
+RangeError: bignum too big to convert into 'long'
+RangeError: bignum too big to convert into 'long'
+TypeError: no implicit conversion from nil to integer
+TypeError: no implicit conversion of true into Integer
+1
+0
+0
+0
+FloatDomainError: NaN
+1
+0
+0
+"TypeError"
+"TypeError"
+"TypeError"
+"TypeError"
+"TypeError"
+"TypeError"
+300
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+-6

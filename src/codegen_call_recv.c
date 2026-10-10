@@ -13542,6 +13542,239 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
 }
 
 /* Element access on a boxed receiver: an index read, []= and [] with one or two arguments (emit_poly_call's arms, in their order) */
+/* Can the program have given a class a method of one of these names? A def
+   of the name, the compiler's own tables, or any alias, alias_method,
+   define_method or define_singleton_method, which may name it; and what
+   the walk of the program as written answers (an_prog_never_gives), which
+   read it ahead of every desugar: a Symbol of the name, a name sent by
+   value, a text evaluated, a binding. Asked for two lists, `which` of
+   them, and answered once for each. */
+static int program_may_define(Compiler *c, const char *const *names, int which) {
+  static const Compiler *memo_c; static int memo[2];
+  if (memo_c != c) { memo_c = c; memo[0] = memo[1] = -1; }
+  if (memo[which] >= 0) return memo[which];
+  const NodeTable *nt = c->nt;
+  int may = comp_kind_first(c, NK_AliasMethodNode) >= 0;
+  for (int i = 0; names[i] && !may; i++)
+    may = comp_method_index(c, names[i]) >= 0 || any_class_defines(c, names[i]) || !an_prog_never_gives(names[i], 0);
+  for (int d = comp_kind_first(c, NK_DefNode); d >= 0 && !may; d = comp_kind_next(c, d)) {
+    const char *dn = nt_str(nt, d, "name");
+    for (int i = 0; dn && names[i] && !may; i++) may = sp_streq(dn, names[i]);
+  }
+  for (int k = comp_kind_first(c, NK_CallNode); k >= 0 && !may; k = comp_kind_next(c, k)) {
+    const char *kn = nt_str(nt, k, "name");
+    may = kn && (sp_streq(kn, "define_method") || sp_streq(kn, "define_singleton_method") ||
+                 sp_streq(kn, "alias_method"));
+  }
+  return memo[which] = may;
+}
+/* Is this operand of a read `x[k]`, its index or a receiver that is no
+   variable, proved to leave the variable `vn` as it is: to run none of the
+   program's code, and to write no variable that can be `vn`, which a write
+   of kind `wk` names? With no `vn` it is to write no variable at all. Only
+   what is listed is: a number, a Symbol or a String literal; a read of a
+   variable, or of a constant the program defines that reads its static; a
+   plain write of a local, an instance variable or a class variable of
+   another name; and two calls. One is a typed Array read by a typed
+   Integer, in a program with no `[]` of its own. The other is an
+   arithmetic, comparison or bit operator of an Integer or a Float with an
+   Integer, a Float or a boolean, in a program that gives no class an
+   operator of its own: an operator reaches the program only through one
+   (`3 == k` asks k's `==`, `3 < k` its coerce, and a reopened Float
+   answers `f * 2`). Not listed, so taken to write the variable: a
+   write of a global, which can be the same one by another name (`alias $y
+   $x`; `$-d` is `$DEBUG`); `nil`, `true` and `false`, which is what a
+   `require` inside a statement is replaced by while its file runs ahead of
+   the statement; a `[]` on a boxed value, which calls a Proc; and every
+   other call, for a method, a block or a required file can write it. */
+static int operand_leaves_slot(Compiler *c, int id, NodeKind wk, const char *vn) {
+  static const char *const OPS[] = {
+    "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=", "==", "!=", "<=>", "&", "|", "^", "<<", ">>",
+    /* eighteen operators, then what one of them may call that is none */
+    "coerce", "eql?", "hash", "method_missing", "respond_to_missing?", NULL };
+  static const char *const AREF[] = { "[]", NULL };
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 1;
+  NodeKind k = nt_kind(nt, id);
+  switch (k) {
+    case NK_ParenthesesNode: case NK_StatementsNode: case NK_SelfNode:
+    case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode: case NK_StringNode:
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+      break;
+    case NK_ConstantReadNode: {
+      const char *cn = nt_str(nt, id, "name");
+      LocalVar *cv = cn ? comp_const(c, cn) : NULL;
+      if (!cv || cv->type == TY_UNKNOWN || cv->init_guarded) return 0;
+      break;
+    }
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_ClassVariableWriteNode: {
+      const char *wn = nt_str(nt, id, "name");
+      if (!vn || (k == wk && (!wn || sp_streq(wn, vn)))) return 0;
+      break;
+    }
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver"), a = nt_ref(nt, id, "arguments"), ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      if (!nm || recv < 0 || ac != 1 || nt_ref(nt, id, "block") >= 0) return 0;
+      TyKind at = comp_ntype(c, av[0]), rt = comp_ntype(c, recv);
+      if (sp_streq(nm, "[]")) {
+        if (!ty_is_array(rt) || at != TY_INT || program_may_define(c, AREF, 1)) return 0;
+        break;
+      }
+      int op = 0;
+      for (int i = 0; i < 18 && !op; i++) op = sp_streq(nm, OPS[i]);
+      NodeKind ak = nt_kind(nt, av[0]), rk = nt_kind(nt, recv);
+      if (!op || !(rk == NK_IntegerNode || rk == NK_FloatNode || rt == TY_INT || rt == TY_FLOAT) ||
+          !(ak == NK_IntegerNode || ak == NK_FloatNode || at == TY_INT || at == TY_FLOAT || at == TY_BOOL) ||
+          program_may_define(c, OPS, 0)) return 0;
+      break;
+    }
+    default: {
+      const char *ty = nt_type(nt, id);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (!operand_leaves_slot(c, nt_ref_at(nt, id, i), wk, vn)) return 0;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (!operand_leaves_slot(c, ids[j], wk, vn)) return 0;
+  }
+  return 1;
+}
+/* Does this index hold a `nil`, `true` or `false` anywhere under it, a
+   block's body and a literal's elements too? A `require` inside a statement
+   is replaced by one, and its file has run ahead of the statement by then:
+   the receiver, whatever reads it, may already hold what the file left (a
+   local of the top level too, which the file's own top level can write). */
+static int index_holds_nil_or_bool(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_NilNode || k == NK_TrueNode || k == NK_FalseNode) return 1;
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (index_holds_nil_or_bool(c, nt_ref_at(nt, id, i))) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (index_holds_nil_or_bool(c, ids[j])) return 1;
+  }
+  return 0;
+}
+/* Can the program have given a class a method that CRuby calls while it
+   reads `x[k]`? The read is `[]`. Integer#[] and Array#[] ask an index
+   that is no Integer for `begin` (rb_range_values: is it a Range?) and
+   then for `to_int` (rb_to_integer), which a Numeric answers by its
+   `to_i`. Each ask is rb_check_funcall: it calls a `respond_to?` the
+   program gave first, and where the name finds no method a
+   `respond_to_missing?` and a `method_missing`. `end` and `exclude_end?`
+   are called only once `begin` has answered, so they need no word here.
+   A `to_int` the program gives Rational answers `x[3/2r]`, and bit 0 can
+   be the bit it names; a `respond_to?` that answers false makes the read a
+   TypeError, and a rescue can print what bit 0 printed. Answered by the
+   walk of the program as written (an_prog_never_gives): no def and no
+   Symbol of the name, and nowhere a name sent by value, a text evaluated
+   or a binding, which can give one that no node shows. Answered once. */
+static int program_gives_index_word(Compiler *c) {
+  static const char *const ASKED[] = { "[]", "begin", "to_int", "to_i", "respond_to?",
+                                       "respond_to_missing?", "method_missing", NULL };
+  static const Compiler *memo_c; static int memo;
+  if (memo_c != c) {
+    memo_c = c; memo = 0;
+    for (int i = 0; ASKED[i] && !memo; i++) memo = !an_prog_never_gives(ASKED[i], 0);
+  }
+  return memo;
+}
+/* Is this local read its own C variable (`lv_x`)? Then only this function
+   writes it, by a node that names it (the top level of a file required in
+   the index too, which is no node under the index:
+   index_holds_nil_or_bool). A local a proc shares is read through its cell
+   or its capture field, and whatever runs while the index does can write
+   that. */
+static int local_reads_own_slot(Compiler *c, int recv) {
+  const char *nm = nt_str(c->nt, recv, "name");
+  Buf rb; memset(&rb, 0, sizeof rb);
+  if (nm) emit_local_ref(c, recv, nm, &rb);
+  int own = rb.p && !strncmp(rb.p, "lv_", 3);
+  free(rb.p);
+  return own;
+}
+/* Does anything under this index name the local `vn` but a read of it? A
+   write of any form, a target, a parameter of a block: each carries the
+   name, and so does a call of a method so named, which is taken for one. */
+static int index_names_local(Compiler *c, int id, const char *vn) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  if (nm && sp_streq(nm, vn) && nt_kind(nt, id) != NK_LocalVariableReadNode) return 1;
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (index_names_local(c, nt_ref_at(nt, id, i), vn)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (index_names_local(c, ids[j], vn)) return 1;
+  }
+  return 0;
+}
+/* Is the read `x[k]` not proved to answer the same whichever of its
+   receiver and its index runs first? An Integer answers bit 0 for an index
+   that is no Integer, and where the index ran first and assigned the
+   receiver, that can be CRuby's bit of the value before: such a read stays
+   sp_poly_index_poly's. The index does run first in `$x[k.tap { $x = v }]`
+   and in `o.v[case n when 1 then o.v = w; k end]`: a block the compiler
+   runs in line and a `case` are both ahead of the receiver. So nothing is
+   taken from the order; two shapes are proved without it. One is a
+   receiver that is a local read from its own C variable
+   (local_reads_own_slot), whose index names that local nowhere but to
+   read it (index_names_local). The other is a receiver and an index that
+   each run none of the program's code (operand_leaves_slot): a bare
+   global, instance variable or class variable, or a local a proc shares,
+   whose index may still plainly write a variable of another name; and a
+   receiver that is no variable, with no write on either side. A local a
+   proc shares is read through its cell: the body of a Fiber reads it
+   after an index that yields, and the scope has assigned it by then. A
+   `require` in the index has run its file before any receiver is read,
+   and the file's top level can write a local of the top level too, so an
+   index that holds a `nil`, `true` or `false` is not proved, whatever its
+   receiver (index_holds_nil_or_bool); nor is the read a `method(:[])`
+   object makes, whose index is its own parameter. Where the program may
+   load a file the compiler did not read (g_require_unread), or the
+   analysis decided a test for this engine and dropped an arm
+   (g_engine_decided), no read is proved: what CRuby runs there can give a
+   class a `[]`, a `to_int` or an operator of its own, and bit 0 can be
+   what CRuby's call of it answers. Nor is one in a program that may itself
+   have given a class one of the methods the read asks
+   (program_gives_index_word), or that reopens a builtin exception class
+   (any_exc_reopen): a `raise` the program writes runs the `initialize`
+   such a class gives, a raise by the runtime does not, and a rescue can
+   print what bit 0 printed. */
+static int index_order_unproved(Compiler *c, int recv, int index) {
+  const NodeTable *nt = c->nt;
+  NodeKind rk = nt_kind(nt, recv);
+  if (g_require_unread || g_engine_decided || program_gives_index_word(c) || any_exc_reopen(c)) return 1;
+  if (index_holds_nil_or_bool(c, index)) return 1;
+  if (nt_kind(nt, index) == NK_LocalVariableReadNode) {
+    const char *in = nt_str(nt, index, "name");
+    if (in && !strncmp(in, "__bam_", 6)) return 1;
+  }
+  const char *vn = nt_str(nt, recv, "name");
+  if (rk == NK_LocalVariableReadNode && local_reads_own_slot(c, recv))
+    return !vn || index_names_local(c, index, vn);
+  if (rk != NK_LocalVariableReadNode && rk != NK_GlobalVariableReadNode &&
+      rk != NK_InstanceVariableReadNode && rk != NK_ClassVariableReadNode)
+    return !(operand_leaves_slot(c, recv, NK_CallNode, NULL) && operand_leaves_slot(c, index, NK_CallNode, NULL));
+  if (!vn) return 1;
+  return !operand_leaves_slot(c, index, rk == NK_GlobalVariableReadNode ? NK_GlobalVariableWriteNode :
+                                        rk == NK_InstanceVariableReadNode ? NK_InstanceVariableWriteNode :
+                                        rk == NK_ClassVariableReadNode ? NK_ClassVariableWriteNode :
+                                                                         NK_LocalVariableWriteNode, vn);
+}
 static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   /* poly receiver: arr[start, len] = src -- 3-arg splice assign
      Skip Fiber/Fiber.current storage receivers (handled later). */
@@ -13865,7 +14098,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
            the hash, string or Struct arms, so the cls_id test and the cold
            call behind it are dead code on this read. analyze established the
            proof for the GC root elision; this is the same fact paying twice. */
-        buf_puts(b, at != TY_INT ? "sp_poly_index_poly("
+        buf_puts(b, at != TY_INT ? index_order_unproved(c, recv, argv[0]) ? "sp_poly_index_poly("
+                                                                               : "sp_poly_index_poly_conv("
                     : expr_is_arr_or_nil(c, recv) && decide_node(c->nt, recv, "aon-get", NULL) ? "sp_poly_arr_get_aon("
                                                   : "sp_poly_arr_get_hash(");
         emit_expr(c, recv, b);
@@ -13875,7 +14109,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       }
       /* a non-poly key (e.g. a Method): box it, then index polymorphically */
       if (!ar.untyped) {
-        buf_puts(b, "sp_poly_index_poly("); emit_expr(c, recv, b);
+        buf_puts(b, index_order_unproved(c, recv, argv[0]) ? "sp_poly_index_poly(" : "sp_poly_index_poly_conv(");
+        emit_expr(c, recv, b);
         buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
         { *out = 1; return 1; }
       }
