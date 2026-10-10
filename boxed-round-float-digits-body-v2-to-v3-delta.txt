@@ -1,0 +1,15 @@
+The round-digits piece: body -v2 to -v3 (T1 only), paragraph by paragraph. No code token changes; the head stays 0a5f017a9c5f; the commit message -v2 carries no cost figure and is unchanged.
+
+OLD:
+Cost: the range test on a Float count at this site, at most 8 instructions a call. callgrind, 200,000 calls each, before and after, with the instructions a call in parentheses (`v` a boxed Integer or Float beside the class, `a` a Float local, `ds` a Float Array, `n` an Integer):
+
+NEW:
+Cost: the range test on a Float count at this site, at most 13 instructions a call: up to 8 in the rows below, and 13 in one case under them, where master itself moves the dispatch into a function. callgrind, 200,000 calls each, before and after, with the instructions a call in parentheses (`v` a boxed Integer or Float beside the class, `a` a Float local, `ds` a Float Array, `n` an Integer):
+
+----
+
+OLD:
+Where the count is a constant the C compiler folds the test away (one instruction is left with gcc). The call the site writes is as long as the cast it replaces, because master moves a dispatch of 320 characters or more into a function of its own (`pd_hoist`) and a longer line would carry sites over that size. In a method of 100 such calls none is moved, on master or here, and the generated C is master's but for the helper's name where the cast was: 15,074,616 to 16,077,419, 5 a call, with gcc and 12,032,798 and 12,032,762, nothing a call, with clang, over 200,000 calls.
+
+NEW:
+Where the count is a constant the C compiler folds the test away (one instruction is left with gcc). The call the site writes is as long as the cast it replaces, because master moves a dispatch of 320 characters or more into a function of its own (`pd_hoist`) and a longer line would carry sites over that size. In a method of 100 such calls beside a class whose method answers a String none is moved, on master or here, and the generated C is master's but for the helper's name where the cast was: 15,074,616 to 16,077,419, 5 a call, with gcc and 12,032,798 and 12,032,762, nothing a call, with clang, over 200,000 calls. Beside a class whose own method answers an Integer (`def floor(d) = 7`) master itself moves the dispatch of those 100 calls into one function, and here too; the C is again master's but for the helper's name, and the test is paid inside that function. That is the dearest measured: with a count known only at run time, 10,479,607 to 13,079,616, 13 a call, for an Integer receiver and 62,879,607 to 64,479,616, 8 a call, for a Float one with gcc, and 5 a call for each with clang; with a constant count 7 and 2 with gcc and nothing with clang.
