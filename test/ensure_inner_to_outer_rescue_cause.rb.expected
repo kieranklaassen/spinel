@@ -1,0 +1,9 @@
+inner ensure
+named: TypeError cause nil
+named left: TypeError
+inner ensure
+bare: NotImplementedError cause nil
+bare left: NotImplementedError
+inner ensure
+ring: first cause nil
+ring left: RuntimeError

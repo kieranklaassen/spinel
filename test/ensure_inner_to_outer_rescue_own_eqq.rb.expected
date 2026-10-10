@@ -1,0 +1,9 @@
+inner
+outer
+class: out Never
+inner
+outer
+module: out Tagged
+inner
+outer
+singleton class: out Quiet
