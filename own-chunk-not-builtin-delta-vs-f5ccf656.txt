@@ -1,0 +1,63 @@
+diff --git a/src/analyze_desugar.c b/src/analyze_desugar.c
+index 2d61f79ce..101508b78 100644
+--- a/src/analyze_desugar.c
++++ b/src/analyze_desugar.c
+@@ -11365,18 +11365,19 @@ int desugar_enum_pair_lone_param(Compiler *c) {
+    of a step where each spreads them. Nor is uniq with a lone |*r|, which
+    keeps an Array around a String the Enumerator made, nor &:m, which
+    hands m the second value of a step and no third, nor a block of
+-   numbered parameters, which is not asked. */
++   numbered parameters, which is not asked. A lone parameter that takes its
++   value apart (`|(a, b)|`) is a lone |x| here, and block-locals (`|x; y|`)
++   leave the shape as it is. */
+ static int own_enum_hop_proven(const NodeTable *nt, const char *nm, int blk) {
+   if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+   int bp = nt_ref(nt, blk, "parameters");
+   int pn = bp >= 0 && nt_kind(nt, bp) == NK_BlockParametersNode ? nt_ref(nt, bp, "parameters") : -1;
+   if (pn < 0) return 0;
+-  int P = 0, O = 0, Q = 0, kn = 0, ln = 0;
++  int P = 0, O = 0, Q = 0, kn = 0;
+   const int *pre = nt_arr(nt, pn, "requireds", &P);
+   nt_arr(nt, pn, "optionals", &O); nt_arr(nt, pn, "posts", &Q); nt_arr(nt, pn, "keywords", &kn);
+-  nt_arr(nt, bp, "locals", &ln);
+   int rest = nt_ref(nt, pn, "rest");
+-  if (O || Q || kn || ln || nt_ref(nt, pn, "keyword_rest") >= 0 || nt_ref(nt, pn, "block") >= 0) return 0;
++  if (O || Q || kn || nt_ref(nt, pn, "keyword_rest") >= 0 || nt_ref(nt, pn, "block") >= 0) return 0;
+   const char *rn = P == 0 && rest >= 0 && nt_kind(nt, rest) == NK_RestParameterNode ? nt_str(nt, rest, "name") : NULL;
+   int lone_x = P == 1 && rest < 0 && nt_kind(nt, pre[0]) == NK_RequiredParameterNode;
+   if (!lone_x && !(rn && *rn)) return 0;
+diff --git a/test/own_method_named_chunk.rb b/test/own_method_named_chunk.rb
+index 37f0a172c..212a365da 100644
+--- a/test/own_method_named_chunk.rb
++++ b/test/own_method_named_chunk.rb
+@@ -32,6 +32,14 @@ class Hash
+ end
+ p({ 5 => 6 }.chunk.map { |x| x })
+ 
++# a lone parameter that takes its value apart is a lone |x|, and block-locals
++# leave the shape as it is
++p slice_after.map { |(a, b)| [a, b] }
++p slice_after.uniq { |(a, b)| b }
++p slice_after.count { |x; y| y = x; y == 5 }
++p slice_after.uniq { |x; y| y = x.to_s[-2]; y }
++p f.chunk_while(1).none? { |*r; y| y = r; y.size == 2 }
++
+ # the name is read as the program's own only over an iterator and a block
+ # master answers right under any other name; the rest keep their reading
+ p f.slice_when.map { |*r| r }
+diff --git a/test/own_method_named_chunk.rb.expected b/test/own_method_named_chunk.rb.expected
+index 1f8578054..1ebf01650 100644
+--- a/test/own_method_named_chunk.rb.expected
++++ b/test/own_method_named_chunk.rb.expected
+@@ -10,6 +10,11 @@ false
+ [5, 6]
+ [7, 8]
+ [[5, 6]]
++[[5, nil], [6, nil]]
++[[5, 0]]
++1
++[[5, 0]]
++false
+ [["a"], ["b"], ["a"]]
+ ["a", "b"]
+ [5, 0]

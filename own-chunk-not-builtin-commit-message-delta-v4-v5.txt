@@ -1,0 +1,8 @@
+39,40c39,42
+< one? with a lone |x| or a lone |*r|, and uniq with a lone |x|. Over
+< any other the name keeps master's reading, which some programs need:
+---
+> one? with a lone |x| or a lone |*r|, and uniq with a lone |x|. A
+> lone parameter that takes its value apart, |(a, b)|, is a lone |x|
+> here, and block-locals (|x; y|) leave the shape as it is. Over any
+> other the name keeps master's reading, which some programs need:
