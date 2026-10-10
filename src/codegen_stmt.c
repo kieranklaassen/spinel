@@ -10049,6 +10049,31 @@ static int rescue_offers(const NodeTable *nt, int rescue) {
   return bare ? 2 : 1;
 }
 
+/* Where the exception an ensure region still holds goes when another
+   ensure region, `outer`, lies around it: raised again to the handler
+   between the two, or handed to the outer region (the comment at the call
+   in emit_begin says which and why). One rule for the three kinds of
+   region: a begin's ensure, the region of a synchronize block and that
+   of select!'s loop. Each raises by class and message with the object it
+   may hold pending.
+   indent < 0: on the caller's line, a space after each statement. */
+void emit_ensure_exc_out(Buf *b, int indent, int eid, const EnsureCtx *outer) {
+  const char *end = indent < 0 ? " " : "\n";
+  char raise[160];
+  snprintf(raise, sizeof raise, "{ sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }", eid, eid, eid);
+  if (g_exc_frame_depth > outer->exc_base + 1 || outer->rescued == 1) {
+    buf_printf(b, "if (_excf%d) %s%s", eid, raise, end);
+    return;
+  }
+  if (outer->rescued) {
+    buf_printf(b, "if (_excf%d && (!sp_exc_is_standard_error(_exccls%d) || sp_exc_cls_matches(_exccls%d, \"StandardError\"))) %s%s",
+               eid, eid, eid, raise, end);
+    if (indent >= 0) emit_indent(b, indent);
+  }
+  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }%s",
+             eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid, end);
+}
+
 void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) {
   const NodeTable *nt = c->nt;
   int body = nt_ref(nt, id, "statements");
@@ -10356,20 +10381,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          a class the runtime does not know for a StandardError, so with one
          in the list such a class is handed on (rescue_offers). */
       emit_indent(b, indent);
-      if (g_exc_frame_depth > outer->exc_base + 1 || outer->rescued == 1) {
-        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
-                   eid, eid, eid, eid);
-      }
-      else {
-        if (outer->rescued) {
-          buf_printf(b, "if (_excf%d && (!sp_exc_is_standard_error(_exccls%d) || sp_exc_cls_matches(_exccls%d, \"StandardError\")))"
-                        " { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
-                     eid, eid, eid, eid, eid, eid);
-          emit_indent(b, indent);
-        }
-        buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
-                   eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
-      }
+      emit_ensure_exc_out(b, indent, eid, outer);
     }
     else {
       /* Unhandled exception: re-raise using the saved class/message. */

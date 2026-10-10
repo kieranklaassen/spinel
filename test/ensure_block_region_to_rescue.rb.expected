@@ -1,0 +1,46 @@
+rescued held
+outer ensure
+false
+rescued at 3
+outer ensure
+[2, 3, 4]
+rescued ensure 
+se out:in
+false
+ffe out:in
+[1, 2, 3]
+outer false
+sync miss: out TypeError
+took DeepError
+outer false
+sync second: returned
+took IOError
+outer false
+sync bare: returned
+outer false
+sync bare miss: out NotImplementedError
+took IndexError
+outer false
+sync splat: returned
+took NotImplementedError
+outer false
+sync all: returned
+outer 3
+select miss: out TypeError
+took KeyError
+outer 3
+select: returned
+took RuntimeError plain
+outer [2, 3]
+select bare: returned
+took Coded 7 coded
+outer false
+object: returned
+inner xxx
+took 8 coded
+outer false
+ensure in the block: returned
+6000
+ifoisoiqoiso
+false
+late
