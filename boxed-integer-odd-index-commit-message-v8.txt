@@ -1,0 +1,88 @@
+A boxed Integer's [] reads a Rational, nil or Bignum index
+
+    a = [5, Rational(3, 2), "s"]
+    x = a[0]
+    k = a[1]
+    p x[k]
+
+printed 1, bit 0 of 5, where CRuby prints 0, bit 1. sp_poly_index_poly
+reads one bit of a boxed Integer by an Integer or a Float index; an
+index of any other kind that no earlier arm takes falls to the last
+line, which reads offset 0. sp_poly_index_poly_conv is that function
+with one line more ahead of the last: a Rational or a Complex with no
+imaginary part is the Integer it converts to, and nil, true or false is
+CRuby's TypeError. An index past a word (a Bignum, or a Rational or a
+Complex that large) reads the receiver's sign above its bits and 0
+below; a Bignum receiver takes a Bignum so and no other index that
+large: CRuby's RangeError. Those kinds are listed, and every other
+still reads bit 0: an object of a user class, a Class, a Float Range,
+and an Array, a Hash or a Proc, whose TypeError CRuby words by a `to_s`
+it asks the index's class.
+
+sp_poly_index_poly is as it was, and so is every caller of it but one:
+a read written `x[k]` takes the new function where it is proved to
+answer the same whichever of its receiver and its index runs first.
+The index can run first: a block the compiler runs in line
+(`$x[k.tap { $x = v }]`) and a `case` (`o.v[case n when 1 then
+o.v = w; k end]`) are both ahead of the receiver. The bit is then read
+of the value the index assigned, and bit 0 of that can be CRuby's bit
+of the value before. Two shapes are proved. One is a receiver that is a
+local in its own C variable, whose index names that local nowhere but
+to read it: nothing else writes such a local. The other is a receiver
+and an index that each run none of the program's code. Listed for that
+are number, Symbol and String literals, reads of variables and of the
+program's constants (but one set by `K = SomeClass.new`), a typed
+Array read by a typed Integer in a program with no `[]` of its own, and
+an operator of an Integer or a Float with a number or a boolean in a
+program with no operator of its own; under a receiver that is a bare
+global, instance variable or class variable, or a local a proc shares,
+the index may also plainly write a local, an instance variable or a
+class variable of another name. A write of a global is not listed:
+another name can reach it (`alias $y $x`; `$-d` is `$DEBUG`). Nor is
+any other call, so `h["n"][h["k"]]`, two reads of a typed Hash, keeps
+sp_poly_index_poly, for a Hash read can run a default block; so does a
+receiver that a method answers.
+
+For every receiver, an index that holds `nil`, `true` or `false` is not
+proved: a `require` in a statement is replaced by one while its file
+runs ahead of the statement, and the file's top level can write a
+local of the top level too. Nor is the read a `method(:[])` object
+makes, whose index is its own parameter. And no read is proved in a
+program that may load a file the compiler did not read
+(g_require_unread), or in which the analysis decided a test for this
+engine and dropped an arm (`if RUBY_ENGINE == "ruby"`): what CRuby runs
+there can give Integer a `[]` or an operator of its own, and bit 0 can
+be what CRuby's call of it answers. desugar_engine_branches says so in
+g_engine_decided, set where it has changed the node table. Nor is one
+proved in a program that may itself have given a class a method the
+read calls: `[]`; `begin`, by which Integer#[] asks an index that is no
+Integer whether it is a Range (rb_range_values); `to_int`, which it
+asks next (rb_to_integer), and `to_i`, by which a Numeric answers it;
+and `respond_to?`, `respond_to_missing?` and `method_missing`, which
+each of those asks goes through (rb_check_funcall). `end` and
+`exclude_end?` are called only once `begin` has answered, so they are
+not asked for. A `to_int` the program gives Rational answers
+`x[3/2r]`, and bit 0 can be the bit it names; a `respond_to?` that
+answers false makes the read a TypeError, and a rescue can print what
+bit 0 printed. That is asked of the walk of the program as written
+(an_prog_never_gives): no def and no Symbol of the name, and nowhere a
+name sent by value, a text evaluated or a binding, which give a method
+that no node shows. The two lists above are asked of it as well. And
+none is proved in a program that reopens a builtin exception class
+(any_exc_reopen): CRuby runs an `initialize` such a class gives for the
+TypeError of `x[true]` too, and a rescue can print what bit 0 printed;
+a `raise` the program writes runs it, a raise by the runtime does not.
+
+Test: test/boxed_integer_index_not_integer.rb
+Test: test/boxed_integer_index_global_alias.rb
+Test: test/boxed_integer_index_require_value.rb
+Test: test/boxed_integer_index_yield.rb
+Test: test/boxed_integer_index_unread_file.rb
+Test: test/boxed_integer_index_engine_arm.rb
+Test: test/boxed_integer_index_own_to_int.rb
+Test: test/boxed_integer_index_alias_by_value.rb
+Test: test/boxed_integer_index_own_respond_to.rb
+Test: test/boxed_integer_index_reopened_error.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

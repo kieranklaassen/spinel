@@ -1,0 +1,48 @@
+A boxed Array converts an index that is no Integer as Array#[] does
+
+    a = [[10, "s", :z], Rational(3, 2), 2**70]
+    h = a[0]
+    p h[a[1]]
+    p h[a[2]]
+
+raised TypeError at the first read and, with that line gone, printed 10
+at the second, where CRuby prints "s" and raises RangeError. The arm
+sp_poly_index_poly has for a boxed Array's index that is no Integer
+reads a Float and raises TypeError for every other kind, so a Rational
+and a Complex, which Array#[] converts, stop there; and it leaves a
+Bignum to the last line, which reads element 0.
+
+sp_poly_index_poly_conv, which a read proved to answer the same in
+either order takes, converts those as Array#fill's offset is converted
+(sp_array_fill_offset_arg): a Rational or a Complex answers the
+element, a Bignum past a word is CRuby's RangeError, and true and false
+are named as CRuby names them. Those are the kinds it lists
+(sp_poly_ary_index_other); a Float is read by the two lines that read
+it before, and every other kind keeps the TypeError the arm gave it. A
+Complex whose real part is past a word converts to a Bignum, so it is
+that RangeError too, raised before the conversion: sp_complex_to_int
+casts the real part with no range test. The one Bignum that fits a
+word, the smallest Integer, is an offset past every Array and answers
+nil. The listed kinds are read out of line, so an Integer or a Float
+index runs the lines it ran.
+
+A Float Range is still a TypeError, where CRuby slices. So is an
+object of the program's that answers to_int: no read is proved in a
+program with a to_int of its own (the commit this stands on).
+
+sp_poly_index_poly keeps its arm, and so does every read that is not
+proved (index_order_unproved, the commit this stands on). A bare
+global, instance variable or class variable can be read after its
+index ran; where the index assigned it an Array, the element 0 a
+Bignum read there can be CRuby's answer of the value before (a Hash
+read by a Bignum is nil). Nor is a read proved in a program that
+reopens a builtin exception class (any_exc_reopen, asked by the commit
+this stands on): CRuby runs an `initialize` such a class gives for the
+RangeError raised here, and a rescue can print what element 0 printed;
+a `raise` the program writes runs it, a raise by the runtime does not.
+
+Test: test/boxed_array_index_converts.rb
+Test: test/boxed_array_index_reopened_error.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

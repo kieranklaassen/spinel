@@ -1,0 +1,35 @@
+A String index on a boxed Symbol answers its name's substring
+
+    def pick(n) = n > 0 ? {a: 1} : :stone
+    s = pick(0)
+    p s["ton"]   # nil; CRuby: "ton"
+
+Symbol#[] is String#[] on the Symbol's name. sp_poly_get_str answers
+the substring for a String and for a shared String, and nil for a
+Symbol with every other value that is no object. sp_poly_get_str_conv
+is that function with one line changed: a Symbol answers the substring
+its name holds, with a copy of the index, for CRuby's answer is a new
+String, never the index itself. An index that is not whole characters
+is nil though the name holds its bytes, as CRuby's search refuses it; a
+binary index with a byte past ASCII, which CRuby raises for, is nil as
+it was. The search is out of line, behind the test for a value that is
+no object which the function already makes, so a Hash's read meets no
+new test. An index the name does not hold is the read a value that is a
+Hash elsewhere makes, so it is answered before the search and the copy:
+the index's bytes up to its first NUL are sought in a name that has no
+header, which holds no NUL.
+
+sp_poly_get_str is as it was, and so is every caller of it but two: a
+read by a typed String that is proved to answer the same whichever of
+its receiver and its index runs first (index_order_unproved, which the
+boxed Integer's commit below this one gives), and
+sp_poly_index_poly_conv, which such a read by a boxed String takes. A
+bare global, instance variable or class variable can be read after its
+index ran; where the index may have assigned it,
+`$x[k.tap { $x = v }]`, the nil a Symbol gave can be CRuby's answer of
+the value before.
+
+Test: test/boxed_symbol_index_string.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

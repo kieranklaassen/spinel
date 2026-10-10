@@ -1,0 +1,1 @@
+A boxed Integer's [] reads a Rational, nil or Bignum index
