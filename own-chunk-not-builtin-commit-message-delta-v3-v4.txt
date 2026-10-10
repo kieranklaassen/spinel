@@ -1,0 +1,22 @@
+--- own-chunk-not-builtin-commit-message-v3.txt
++++ own-chunk-not-builtin-commit-message-v4.txt
+@@ -32,6 +32,19 @@
+ the builtin's, answers some such programs right. A reader or a Struct
+ member of the name is a Symbol of it and keeps master's reading.
+ 
++And it is asked only over an iterator and a block that master answers
++as CRuby does over such a method under any other name, whatever
++Enumerator the method returns (own_enum_hop_proven): map, collect,
++flat_map, collect_concat, filter_map, count, any?, all?, none? and
++one? with a lone |x| or a lone |*r|, and uniq with a lone |x|. Over
++any other the name keeps master's reading, which some programs need:
++each_entry comes to the hop under each's name and packs the values of
++a step where each spreads them, so each is not among them; after
++def chunk = "aba".each_char, chunk.uniq { |*r| r[0] } is ["a", "b"]
++only as the builtin's; and &:m hands m the second value of a step and
++no third, so over steps of three values a program may be right only
++as the builtin's.
++
+ Test: test/own_method_named_chunk.rb.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
