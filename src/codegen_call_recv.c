@@ -14024,7 +14024,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
         { *out = 1; return 1; }
       }
       if (at == TY_STRING) {
-        buf_puts(b, "sp_poly_get_str("); emit_expr(c, recv, b);
+        buf_puts(b, index_order_unproved(c, recv, argv[0]) ? "sp_poly_get_str(" : "sp_poly_get_str_conv(");
+        emit_expr(c, recv, b);
         buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         { *out = 1; return 1; }
       }
