@@ -10480,6 +10480,30 @@ static sp_RbVal sp_poly_shift(sp_RbVal v) {
   sp_raise_nomethod(sp_nomethod_msg("shift", v));
   return sp_box_nil();
 }
+/* Symbol#["sub"]: the substring when the name holds it, a new String. Out of
+   line, so sp_poly_get_str_conv's other receivers do not carry its calls. A
+   miss is the read a value that is a Hash elsewhere makes, so it is
+   answered before the search: a name with no header holds no NUL, and
+   where the index's bytes up to its first NUL are nowhere in it, the index
+   is not. */
+static SP_COLD SP_NOINLINE sp_RbVal sp_poly_sym_get_str(sp_RbVal v, const char *key) {
+  if (v.tag != SP_TAG_SYM || !key) return sp_box_nil();
+  const char *name = sp_sym_to_s((sp_sym)v.v.i);
+  if (key[0] && !sp_str_has_hdr(name))
+    for (const char *p = name; ; p++) {
+      while (*p && *p != key[0]) p++;
+      if (!*p) return sp_box_nil();
+      size_t j = 1;
+      while (key[j] && p[j] == key[j]) j++;
+      if (!key[j]) break;
+    }
+  if (!sp_str_include(name, key)) return sp_box_nil();
+  /* an index that is not whole characters is in no String, and a binary one
+     with a byte past ASCII is an error in CRuby: nil, as it was */
+  if (sp_str_is_binary(key) ? !sp_str_ascii_only(key) : !sp_str_valid_encoding(key))
+    return sp_box_nil();
+  return sp_box_str(sp_str_dup(key));
+}
 static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   /* MatchData#["name"]: the named group */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) {
@@ -10497,6 +10521,51 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   if (sp_poly_is_call_aref(v)) return sp_poly_call_aref(v, sp_box_str(key));
   sp_poly_coll_chk(v, "[]");
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
+  switch (v.cls_id) {
+    case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
+    case SP_BUILTIN_STR_POLY_HASH: return sp_StrPolyHash_get((sp_StrPolyHash*)v.v.p, key);
+    case SP_BUILTIN_STR_STR_HASH: { const char *s = sp_StrStrHash_get((sp_StrStrHash*)v.v.p, key); return s ? sp_box_str(s) : sp_box_nil(); }
+    case SP_BUILTIN_STR_INT_HASH: { sp_int i = sp_StrIntHash_get_opt((sp_StrIntHash*)v.v.p, key); return i == SP_INT_NIL ? sp_box_nil() : sp_box_int(i); }
+    case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_get((sp_PolyPolyHash*)v.v.p, sp_box_str(key));
+    /* OpenStruct#["name"] is the member of that name, as with a Symbol */
+    case SP_BUILTIN_OPENSTRUCT: return key ? sp_OpenStruct_get((sp_OpenStruct*)v.v.p, sp_sym_intern(key)) : sp_box_nil();
+    /* a String is no key of a Symbol- or Integer-keyed Hash: a miss */
+    case SP_BUILTIN_SYM_POLY_HASH: case SP_BUILTIN_INT_INT_HASH: case SP_BUILTIN_INT_STR_HASH:
+      return sp_poly_hash_foreign_miss(v, sp_box_str(key));
+    default: break;
+  }
+  /* Struct#["member"] names the member, like the symbol form (#3369) */
+  if (v.cls_id >= 0 && sp_obj_to_h_fn && key)
+    return sp_poly_get_sym(v, sp_sym_intern(key));
+  /* nor is a String an Array's index (sp_poly_set_str) */
+  if (sp_poly_is_array_kind(v.cls_id))
+    sp_raise_cls("TypeError", SPL("no implicit conversion of String into Integer"));
+  return sp_box_nil();
+}
+/* The same read, line for line, where the emitter proved that it answers
+   the same whichever of its receiver and its index runs first
+   (index_order_unproved, codegen_call_recv.c), but for one line: a Symbol
+   answers the substring of its name. Elsewhere its nil can be CRuby's
+   answer of a value the index replaced, and every other caller keeps
+   sp_poly_get_str. */
+static sp_RbVal sp_poly_get_str_conv(sp_RbVal v, const char *key) {
+  /* MatchData#["name"]: the named group */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) {
+    const char *g = sp_MatchData_aref_name((sp_MatchData *)v.v.p, key ? key : "");
+    return g ? sp_box_str(g) : sp_box_nil();
+  }
+  /* `s["sub"]` is String#[str]: the substring itself when present, else nil.
+     Both string representations answer it, and neither did here -- an
+     immediate string was rejected by the tag test on the next line and a
+     shared handle fell out of the switch below (#4279). */
+  if (v.tag == SP_TAG_STR || sp_poly_is_strbuf(v)) {
+    const char *s = v.tag == SP_TAG_STR ? (v.v.s ? v.v.s : sp_str_empty) : sp_poly_to_s(v);
+    return (key && sp_str_include(s, key)) ? sp_box_str(key) : sp_box_nil();
+  }
+  if (sp_poly_is_call_aref(v)) return sp_poly_call_aref(v, sp_box_str(key));
+  sp_poly_coll_chk(v, "[]");
+  /* a Symbol's name is searched; every other value that is no object is nil */
+  if (SP_UNLIKELY(v.tag != SP_TAG_OBJ)) return sp_poly_sym_get_str(v, key);
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
     case SP_BUILTIN_STR_POLY_HASH: return sp_StrPolyHash_get((sp_StrPolyHash*)v.v.p, key);
@@ -11500,7 +11569,7 @@ static sp_RbVal sp_poly_index_poly_conv(sp_RbVal recv, sp_RbVal idx) {
      heterogeneous Hash arms above keep the original argument; the typed
      String-keyed arms below need its bytes. */
   if (SP_UNLIKELY(sp_poly_is_strbuf(idx))) idx = sp_poly_strbuf_deref(idx);
-  if (idx.tag == SP_TAG_STR) return sp_poly_get_str(recv, idx.v.s);
+  if (idx.tag == SP_TAG_STR) return sp_poly_get_str_conv(recv, idx.v.s);
   if (idx.tag == SP_TAG_SYM) return sp_poly_get_sym(recv, (sp_sym)idx.v.i);
   /* a Range index on a poly STRING is a substring (String#[Range]); without
      this a Range fell through as i=0 and returned char 0 (#3175). */
