@@ -1,0 +1,129 @@
+NOTES: "An exception object raised in a rescue keeps its cause through an ensure"
+
+HEAD f6633122484b32754ac35ae7055f2d1a8799e633, tree c7b6af0a324978f7316d1ed97cf76a936cabff2e. One commit on upstream master dacaa29cb84e93a146c8c9937acc5c24907931b2 (the tip by my own
+ls-remote at 17:34:53 UTC 10-10). It stands on nothing of ours. Unsigned; author and committer dates equal; one
+trailer. Diff: lib/spinel_rt.h +5 -1; test/ensure_object_keeps_cause.rb +187; its .expected +23 (CRuby 3.3.6 with
+--enable-frozen-string-literal). Built from nothing; every check below ran on that build.
+
+WHAT IT CURES. An exception OBJECT raised while another exception is handled lost its cause on the way through an
+ensure. A raise stages the cause and a rescue's catch puts it on the object; an ensure's landing is no catch. The tip
+resumes an exception from an ensure by reading the cause off the object ("An ensure resuming an exception keeps
+the cause it was raised with"), so an object that had not been given the cause yet came out with none. On the
+tips before that change these programs were right: this is the remainder of the two rows closed as done by master.
+
+THE CUT, AND THE ONE DROPPED. One statement in sp_raise_cls: an object raised takes the staged cause there where it
+has none. A first cut gave the cause at the four landings instead (an inline helper beside sp_exc_caught_obj). It
+answered the same and was dropped for its cost: on this tip it moved paths that nothing is raised on (clang 1 to 2
+instructions a pass through an ensure; gcc and clang 1 a pass through a filter's block). The cut at the raise
+touches no inline function and no line of the compiler, so no generated function changes.
+
+lib/spinel_rt.h AND "ADDITIVE ONLY". The hunk adds a four-line comment and one statement on the line of
+sp_raise_cls that stages the cause, so that line shows as edited (+5 -1). No name is removed and no signature
+changes. What a generated program calls answers differently only where an object is raised with a cause staged
+and none on the object. The emitter-side form is the dropped cut: it costs on quiet paths.
+
+REFUSALS. The head adds no refusal in either setting: no line of the compiler changes, and the C of 6,898 corpus
+programs is the same bytes by the bare tip's compiler and the head's, in the default build and with --share-strings.
+
+BEFORE, ON THE BARE TIP. The 13-line program of the body prints "ie" and "took t cause nil" in six cells (default
+build and --share-strings; collector levels unset, 1, 2). CRuby 3.3.6 prints "took t cause #<KeyError: handled>".
+On the head: CRuby's lines in the six cells.
+
+THE KEPT TEST. test/ensure_object_keeps_cause.rb, 23 lines of output, marked gc-stress and share. On the head it is
+right at -O0, -O1, -O2 and -O3, with clang, under SPINEL_GC_STRESS=1 and 2, as the gate's shared leg builds it, and
+with --share-strings at the three collector levels. On the bare tip 8 of its lines are wrong in every build (the
+inverted test); the other 15 are right there, among them the four cases beside (by class and message, an explicit
+nil, an object with a cause, a frozen object). overflow modes: 2 of 2 right (clang -O0, wrap and promote; the
+bare tip has the 8 lines wrong in both). Master's 33 tests of causes, ensures and raises again are right in the
+seven builds on the head as on the bare tip.
+
+THE TWO HARD RULES, BY THE INVERTED TEST.
+- The matrix of 864 (an exception leaving an inner region for a begin with clauses and an ensure: context x raise
+  form x inner region x outer clauses; each program against CRuby's lines): wholly right on the bare tip 633, on
+  the head 723. Programs with a line right on the bare tip and wrong on the head: 0. 90 programs gain a line.
+- The 846 new-road cells (the core in an else clause, the inner region's own else as the place of the raise, a bare
+  raise in an ensure with an exception in flight): wholly right on the bare tip 691, on the head 761. Lost: 0.
+  70 programs gain a line.
+- The named programs (93 programs, 558 cells): right cells on the bare tip 320, on the head 362; wholly right
+  programs 52 and 59. No cell right on the bare tip is wrong on the head.
+- The suite: the 542 tests of test/ that raise and hold a rescue or an ensure, built at -O1 and run: 540 print their
+  .expected; the other 2 (promote_float_to_int.rb, promote_str_to_i_bigint.rb) need a mode the plain runner does not
+  pass and answer the same on the bare tip.
+- No build failure, crash or raise becomes a silent wrong answer: the head changes no refusal and no build, and
+  the one behaviour it changes is the cause of an exception object.
+
+COSTS (callgrind, -O2, gcc 13.3 and clang 18.1; instructions a pass, the bare tip, then the head's difference).
+Quiet paths, a million passes each: 22 programs (an ensure in a loop and in a method; a begin nested in a begin, with a bare clause, two of them, in a method with a rescue and an ensure; a synchronize block and a filter's block, each with and without a begin around; a begin with clauses that nothing is raised in; a begin as a value, three deep, with a rescue of its own on the inner begin, with an else; a rescue, a rescue modifier and a clause on a splat that nothing is raised through): the same count to the instruction on the bare tip and on the head with
+both compilers. (One synchronize program with clang counted 4 apart in 351 million on the bare tip while two
+counts ran at a time; counted one after the other, twice, the sides are 351,664,740 each.)
+The exception's path, 20,000 passes each:
+  one raise, taken by the first clause                       gcc       2,775     +8.0
+                                                             clang     2,708     +4.0
+  one raise, declined by a rescue, taken outside             gcc       7,625    +16.0
+                                                             clang     7,588     +8.0
+  one raise, declined beside an ensure, taken outside        gcc       7,166    +12.0
+                                                             clang     7,146     +4.9
+  an object raised in a rescue body, through an ensure       gcc       8,264    +18.7
+                                                             clang     8,171    +11.7
+  the same by class and message                              gcc       8,524    +17.9
+                                                             clang     8,484     +7.0
+  an object raised in a rescue body, declined                gcc      12,273    +18.0
+                                                             clang    12,211    +12.1
+  by class and message in a rescue body, declined            gcc       6,626     +8.0
+                                                             clang     6,627     +2.0
+  the same under a clause on a splat                         gcc       6,723     +8.0
+                                                             clang     6,775     +2.0
+  a rescue modifier declining what is no StandardError       gcc       2,834     +8.0
+                                                             clang     2,791     +2.0
+  out of a synchronize block, declined                       gcc       8,855    +15.9
+                                                             clang     8,924     +4.0
+  declined by five clauses                                   gcc      23,567    +16.0
+                                                             clang    23,800     +8.0
+A pass takes 8 to 19 instructions more with gcc and 2 to 12 with clang, by how many times it raises:
+the test of the object in sp_raise_cls, and the store where the cause is given. This is the piece's own site.
+Compile time: the compiler is untouched; it counts 2,674,511,587 instructions on a file of 1,000 rescues and
+5,894,315,878 on 2,000 (the bare tip 2,674,511,510 and 5,894,315,801), and writes the same bytes of C.
+
+LEGS. ruby tools/gate.rb check with the commit staged: exit 0. ruby tools/gate.rb check-range over the commit: exit 0 (it warns that no Ruby 4.0 is here, so the
+.expected files were not checked against CRuby 4.0: the Mac's to do). make backtrace-test, scale-test, int-min-test, gc-stress-test: pass.
+make share-strings-test: exit 0 ("share-strings-test: pass"). make share-verify-test: exit 2, the bare tip's own answer on this machine
+("share-verify: 1180 programs, 2 known/conflicting diagnostics, 2 new, 8 stale, 1 failures, 115 channel gaps";
+its one failure is test/share/share_strings_net_http_zlib.rb, "generated C differs with the flags", and the lines it prints as
+new and stale are the bare tip's, line for line). optcarrot's C: the same sum as the bare tip's.
+
+FUNCTIONS EDITED. sp_raise_cls, 139 lines to 143.
+
+A MOVED TIP. By my own ls-remote at 19:39:47 UTC 10-10 the tip is dd29ea35cfaeb32283cb1179397e3d185d202f28, 14 commits past the base.
+(i) The merge of this head with it: exit 0, no conflict; merged tree 4ce90a3002d76846d4c7d98ff3fa54d0ceea79bd.
+(ii) The merged tree was BUILT from nothing, and so was that bare tip. In six cells (default build and --share-strings;
+collector levels unset, 1, 2) the kept test and the 13-line program are right on the merged tree, and each of the twelve small programs prints
+there what it prints on this head on the base. That bare tip prints what the base prints for each of them, the Before lines and the wrong
+lines of the kept test among them: master has not cured it. The rest of the round was not run again on the merged tree.
+(iii) The 14 commits touch no function this commit edits: sp_raise_cls is the same bytes on the two tips, and they do
+not touch lib/spinel_rt.h.
+(iv) By my ls-remote at 20:37:32 UTC the tip is 61dedaeac6981b4c0ae9bc2b9c07b3935a5eb32d, 4 commits further (18 past the base): this head
+merges with it by exit status 0; that merged tree was NOT built. The 4 commits touch none of lib/spinel_rt.h,
+src/codegen_stmt.c and src/codegen_expr.c.
+
+WITH THE EXCEPTION-ATTRIBUTE HEAD ("An attribute of an exception class with no initialize is kept once set",
+0fcde32c6fa3c41187052f6396689232c4af7aac). Trial merge of this head with it: exit 0, no conflict. The merged tree
+built from nothing. On it: that head's six tests and both tests of these two rows, in six cells each (default build
+and --share-strings; collector levels unset, 1, 2): that head's six tests and this row's test are right in the six cells (the second row's test has its 17 lines wrong there, as on this head alone).
+The matrix of 864: the 864 programs print on the merged tree what they print on this head alone, byte for byte (723 wholly right).
+The 846 new-road cells were not run on the merged tree, for time.
+This commit shares no function with that head (it edits sp_raise_cls alone; that head edits lib/sp_exc.c, lib/sp_exc.h and the compiler). Neither row needs "Depends on" for the other.
+
+SIDE FINDS (recorded, none taken; each answers the same on the bare tip and on the heads).
+- A bare raise in an ensure while ANOTHER exception is handled goes out under the handled exception's class: a
+  clause naming the class of the exception in flight does not take it. 10 of the 846 new-road cells are this.
+- A clause never calls a class's own ===, nested as direct (master's standing rule).
+- New: a rescue clause whose operand is a call that itself raises and rescues loses the exception it is asked
+  about. The call's own frame takes the slot the landed exception sits in, so its object is gone (rescue pick => e
+  gives another object than the one raised) and its message is no longer rooted (freed bytes under
+  SPINEL_GC_STRESS=2, an abort where the clause takes the exception). This is why the second commit leaves such
+  a rescue alone.
+- A program that reads Thread#value under a rescue aborts some runs at SPINEL_GC_STRESS=2 (the mark reaches a
+  freed heap string at a root): 1 run of 8 on the bare tip here, with nothing of ours.
+
+WHAT THE OPENING OWES. The gate fence of the body (the Mac's make gate on the tip of that moment), and the first box
+once CRuby 4.0 has printed the .expected files (they are CRuby 3.3.6's here).

@@ -1,0 +1,43 @@
+An exception object raised in a rescue keeps its cause through an ensure
+
+An exception object raised while another exception is handled, and
+leaving through an ensure, came out with no cause:
+
+    class Wrapped < StandardError; end
+    def work
+      raise Wrapped.new("wrapped")
+    ensure
+      puts "cleanup: #{$!.cause.inspect}"
+    end
+    begin
+      begin
+        raise KeyError, "low"
+      rescue KeyError
+        work
+      end
+    rescue Wrapped => e
+      p e.cause
+    end
+
+printed `cleanup: nil` and `nil`; CRuby prints the KeyError twice.
+Raised by class and message (`raise Wrapped, "wrapped"`) the same
+program was right.
+
+A raise stages the cause in sp_pending_cause and leaves it to the
+rescue that catches the exception to put it on the object. An ensure's
+landing is no catch: an exception with no object gets one there,
+holding the staged cause, but an object that already exists was left
+as it was. The ensure then resumes the exception with
+sp_reraise_continues, which reads the cause from the object, and found
+none.
+
+sp_raise_cls now gives an object it raises the staged cause where the
+object has none, as CRuby does at the raise. Every landing sees it: an
+ensure, a synchronize block, a filter's block, an else clause. What the
+staging decides is as it was, so an explicit `cause: nil` stays nil, an
+object that has a cause keeps it, and a frozen object takes none.
+
+The compiler is untouched and no generated function changes: the one
+statement added is in sp_raise_cls, where an exception is being raised.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
