@@ -1,0 +1,86 @@
+@@ -34,14 +34,18 @@
+ first values ahead. Where nothing of the program's runs there (the
+ block's body is reads of its parameter and literals, and the program
+ as written gives no class an ==, an eql?, a hash or a <=>), the Array
+-is made of the item itself: an Enumerator that keeps its items is
+-read by the view's own to_a, so the step loop is master's, and the
+-item is the one it keeps; a generator, which makes its items anew at
+-every to_a, is read once, plain, with the first values taken beside.
+-For any other block the first values go in place ahead of the first
+-step and the values after the first are kept beside them, one step's
+-after another's. No call is on the list: the parameter is the step's
+-first value, of any class, and a Hash's [] runs its default block.
++is made of the item itself and no Array of first values is made: an
++Enumerator that keeps its items is walked as it stands (not for
++uniq!, which writes into what it walks); a generator, which makes its
++items anew at every to_a, is read once, plain; the block binds the
++first value of each item at its step. For any other block
++sp_Enumerator_to_a_firsts (new in lib/spinel_rt.h, beside
++sp_Enumerator_to_a_yielded) puts the first values in place ahead of
++the first step and keeps the values after the first beside them, one
++step's after another's, and sp_yielded_kept_item (new beside it, not
++inlined) makes a survivor's Array of those at the push. No call is on
++the list: the parameter is the step's first value, of any class, and a
++Hash's [] runs its default block.
+ 
+ Under a lone |*r| the one value is asked of a survivor only, when it
+ is pushed, where the block leaves its Array as it is: its body uses
+@@ -65,24 +69,40 @@
+ survivor of such a step is the parameter as it is after the block
+ ran, as it was.
+ 
+-By callgrind, instructions a step with gcc and with clang, on programs
+-that size the answer, which master runs right. A lone |x| over steps
+-of one value (a.each, each_char, each_slice(2)) stays within 2 of
+-master or under it. Over steps of several values, { |x| x } is 4
+-fewer and 15 more over each_with_index (of 929 and 885) and 1 and 25
+-more over a generator of two or of three values a step; clang's 15
+-are sp_yielded_packed, inlined at its one call on master and called
+-here, where it has two. A block that calls anything ({ |x| x + 0 })
+-pays for the values kept ahead: 88 and 104 over each_with_index, 44
+-and 49 over the generator of two values, 84 and 89 of three. A lone
+-|*r| that only reads its Array, and &:abs, stay within 1 of master
+-over each_with_index, over that generator and over a.each; one that
+-may change it pays 15 and 9 over the generator and 23 and 26 over
+-a.each. spinel -c of a program of 1,000 and of 2,000 such calls,
+-against master: 3.83% and 8.07% fewer for the lone |x|, 3.28% and
+-4.89% fewer for the lone |*r|, and the same to 0.03% over an Array,
+-whose C is master's. A block with two parameters, a block with none
+-and no block keep their C.
++uniq with a block still finds a block's value among those it has kept
++by == (the sp_poly_eq scan, master's, for an Array too) where CRuby
++keys them by eql? and hash, and an Enumerator's items now reach that
++scan as an Array's do: over [1, 1.0, 2].each_with_index,
++e.uniq { |x| x } is [[1, 0], [1.0, 1], [2, 2]] and this prints
++[[1, 0], [2, 2]], as master prints [1, 2] for
++[1, 1.0, 2].uniq { |q| q }.
++
++By callgrind, instructions a step with gcc and with clang, master
++against this in one run, on programs that size the answer, which
++master runs right. { |x| x } is fewer than master: 39 and 31 over
++a.each (of 225 and 176), 431 and 433 over each_char, 34 and 31 over
++each_slice(2), 389 and 372 over each_with_index (of 929 and 885), 48
++and 4 over a generator of two or of three values a step. A block that
++calls anything reads the first values ahead, as master does:
++{ |x| x[0] } over each_slice(2), whose steps pack nothing, is
++master's count with gcc and 1 more with clang (of 767 and 756);
++{ |x| x + 0 } pays for the values kept ahead, 80 and 88 over
++each_with_index (of 971 and 920), 30 and 27 over the generator of two
++values, 66 and 62 of three. A lone |*r| that only reads its Array, and
++&:abs, stay within 1 of master over each_with_index, over that
++generator and over a.each; one that may change it pays 15 and 9 over
++the generator and 23 and 26 over a.each. spinel -c of a program of
++1,000 and of 2,000 such calls, against master: fewer for
++r = e.uniq { |x| x } (6.41% and 10.23%) and for
++r = e.uniq { |*q| q[0] } (3.66% and 5.19%), and by 0.21% to 0.63% for
++p e.uniq { |x| x } and p e.uniq { |x| x + 0 }, with .size and
++without, and for both over a.each; more for p e.uniq { |*q| q[0] },
++whose survivor is asked by a test at the push, 0.13% and 0.14% (0.24%
++and 0.22% over a.each), and for a walk whose Enumerator is not a
++local, p pairs.uniq { |x| x } after def pairs, 0.13% and 0.22% (0.04%
++and 0.11% with .size); the same to 0.01% over an Array, whose C is
++master's. A block with two parameters, a block with none and no block
++keep their C.
+ 
+ Test: test/enum_uniq_block_keeps_item.rb.
+ 
