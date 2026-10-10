@@ -3175,6 +3175,20 @@ int srange_member_builtin(Compiler *c, const char *name) {
          (!walks || (an_prog_never_gives("to_int", 0) && an_prog_never_gives("method_missing", 0) &&
                      an_prog_never_gives("<=", 0) && an_prog_never_gives("<", 0)));
 }
+/* May the === of a String Range at `node` answer a boxed value by covering
+   the String it holds? Not where it is not said what a box tagged as a
+   handle holds, and not where the program may give a ===, a <=>, an == or
+   a succ of its own (srange_member_builtin): there the equality it was
+   written as stays. That much is one answer for the program, held once.
+   The equality stays as well at a === the compiler's own Ruby asks
+   (enum_builtin_node): grep and grep_v ask it of each element and are not
+   changed here, and neither is a method the program names `__enum_...`,
+   which reads as that Ruby's. */
+int srange_eqq_covers_boxed(Compiler *c, int node) {
+  static int held = -1;
+  if (held < 0) held = g_strbuf_boxes != SB_BOXES_UNSURE && srange_member_builtin(c, "===");
+  return held && !enum_builtin_node(c, node);
+}
 /* A String method answering its receiver or nil (bop_share_self_answer:
    a bang method, an iterator given a block) called on a local that holds
    the shared handle (--share-strings: or an ivar, a global, a class

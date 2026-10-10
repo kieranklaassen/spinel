@@ -11383,6 +11383,21 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "; ");
         if (hold) { emit_gc_root_tmp_refs(c, rt, tr, b); buf_puts(b, " "); }
         buf_printf(b, "sp_RbVal _a%d = ", tr); emit_boxed(c, argv[0], b);
+        /* === is cover?, and for a boxed value it is new here: a String is
+           covered by its bytes, the plain one and the handle's alike. Any
+           other value keeps the equality with the boxed Range it had, and
+           one test on the tag sends it there; one the argument has just
+           made is held while the Range is boxed. */
+        if (sp_streq(name, "===") && srange_eqq_covers_boxed(c, id)) {
+          int fresh = operand_may_allocate(c, argv[0]);
+          buf_printf(b, "; (sp_bool)(((1u << _a%d.tag) & (1u << SP_TAG_STR | 1u << SP_TAG_OBJ)) && (_a%d.tag == SP_TAG_STR || _a%d.cls_id == SP_BUILTIN_STRBUF)"
+                        " ? (_a%d.tag == SP_TAG_STR ? sp_srange_cover_bytes(_t%d.first, _t%d.last, _t%d.excl, _a%d.v.s)"
+                        " : sp_srange_cover_handle(_t%d.first, _t%d.last, _t%d.excl, _a%d.v.p)) : ",
+                     tr, tr, tr, tr, tr, tr, tr, tr, tr, tr, tr, tr);
+          if (fresh) buf_printf(b, "({ SP_GC_ROOT_RBVAL(_a%d); sp_poly_eq(sp_box_srange(_t%d), _a%d); })); })", tr, tr, tr);
+          else buf_printf(b, "sp_poly_eq(sp_box_srange(_t%d), _a%d)); })", tr, tr);
+          return 1;
+        }
         /* a boxed shared String handle is a String too: its text, asked
            after the plain String. include? walks to it as it does to a
            plain String; cover? compares it by its bytes, out of line
