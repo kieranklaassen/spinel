@@ -1,0 +1,1 @@
+An attribute of an exception class with no initialize is kept once set

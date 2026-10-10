@@ -1,0 +1,695 @@
+===== 1. the reader's delta =====
+# Row 264, piece one, re-cut on master's tip: the reader's delta against dc95405220e8
+
+Title, unchanged: "An attribute of an exception class with no initialize is
+kept once set". Texts v2.
+
+## Where it stands
+
+- Head a5879e969d0f9effbd634b845f2e0d55d5699e78, ONE commit on upstream master
+  2b0ebc0a6bfd513ea869fc48eeb0bfce0c03aa66. Tree
+  218f1791d4a770e3d72deb4072897813acda797c. "Depends on: none".
+- The tip by my `git ls-remote` at 02:05 UTC 10-10 is `da597297426db679e7b2ace03466bf8e049f730b`, 1 commit past the parent ("An --rbs pinned String container takes no demand for handles"): the head merges into it clean by exit status (tree `5e5e32c6c0aa`), and that commit touches no function of the piece nor one its proof reads: its hunks are in strbuf_ivar_source_walk_body of src/analyze.c (an ivar an --rbs seed pins to a typed String container; no program of the tables has one), in the Makefile's rbs-seed-test rule and in a new test under test/rbs-seed. No build was made on that tip.
+- It supersedes dc95405220e8cd7720b9e15f2a413e8b485c4890 on
+  2afc69c54d7a (comments 6089520491, 6089589183, 6089627489), which reader
+  8 passed on its own base. Master moved 82 commits past that base and
+  changed seven functions the piece changes, one of them twice, so the
+  head did not stand there; this is the one re-cut on the tip.
+- Neither a refusal added nor one lifted: docs/limitations.md is not
+  touched.
+- Both sides are built with the rbs parser (vendor/rbs 4.0.1, what `make
+  deps` fetches), as master's Makefile builds where it is present: inline
+  RBS comments are read.
+
+## 1. The re-cut against the carried head
+
+- THE REPLAY. dc95405220e8 replays onto the tip clean by text (`git
+  merge-tree --write-tree`, exit status 0, tree f96cd46b5df4). Its added
+  and removed lines are the carried head's, line for line, under the same
+  functions; emit_stmt_inner's hunk now sits in emit_stmt_node.
+- How master's changes met the piece:
+  - sp_exc_new_sub_sized: master reads the class's display name for the
+    default message (sp_exc_disp_heap). The piece turns that function's
+    body into sp_exc_sub_build; master's two lines are inside it, so the
+    three entries (sized, ivars, caught) all give an unnamed Class.new class
+    its `#<Class:0x...>` message.
+  - emit_sym_class_name_rt: six hunks of master's, none in the piece's two
+    (the table's lines).
+  - emit_and_or_begin_expr, twice: master brackets the modifier rescue's
+    fallback with a RescueSave, and in "A modifier rescue's value with a
+    value-less fallback is held boxed" turns `rt` to TY_POLY when it is
+    void, unknown or nil. The piece's one line there (tip line 3894) is the
+    builder's name in the statement that gives `$!` its object
+    (`sp_exc_obj[sp_exc_top] ? ... : %s(sp_exc_cls[sp_exc_top],
+    sp_exc_msg[sp_exc_top])`). It reads nothing of `rt`, and the boxed
+    temporary holds the arm's value, not that object. By a run (m1, m2,
+    part 4): a modifier whose fallback has no value, with a class of the
+    piece, prints the same lines on both; the modifier's `$!` kept and
+    stored through a method is cured.
+  - emit_rescue: a clause whose operand is no constant goes to
+    sp_exc_matches_operand, which decides the match; the arm then builds
+    the exception where it built it, with the piece's builder.
+  - emit_begin: the retry bookkeeping around emit_rescue is not met. The
+    line that matters is master's `_excobj = sp_exc_caught_obj()`, below.
+  - emit_stmt_node: the piece's one hunk, as it was in emit_stmt_inner.
+  - codegen_program: the piece's one line (`g_xbn_c = NULL;` among the
+    resets, after tip line 16901) and master's new call of
+    emit_ivar_renumber_dispatch (16944) are 43 lines apart; the piece's
+    block after class_needs_scan sits below master's new function and
+    shares no line with it.
+  - Not read by the piece, nor by its proof: ivs_method_sets,
+    cplan_initializers, seed_class_ivar, apply_rbs_seeds. The piece's test
+    of a class (class_exc_built_by_name) asks four things after the
+    analysis: nivars > 0, class_is_exc_subclass, comp_method_in_chain(cid,
+    "initialize") < 0, and that it is no reopened builtin. By a run: an
+    initialize that comes from an included module in an exception class is
+    refused by both alike (i1); a subclass under a parent whose initialize
+    has defaults prints the same lines (i2); a class of the piece with an
+    attribute pinned by `#: String` and an ivar declared by `# @rbs` (rb1)
+    is cured as the others are.
+- WHY THE REPLAY DID NOT STAND (reader 8's find, and mine by the same
+  road). "An ensure keeps the cause of a String raise it raises again"
+  gives an ensure with no rescue clause the object of the raise it
+  catches, when a cause waits for it: sp_exc_caught_obj() builds it with
+  sp_exc_new_for_catch, 120 bytes, at three generated sites. A class of
+  the piece that leaves that way was built at the base size ahead of the
+  piece's entry, which then finds an object and is never asked.
+- THE ANSWER, ruling 2: THE OBJECT IS MADE IN THE GENERATED CODE AHEAD OF
+  MASTER'S CALL. lib/spinel_rt.h is not touched, by no line.
+  - The generated code of a program that has a class of the piece gains a
+    third entry beside sp_exc_own_by_name and sp_exc_catch_own:
+    sp_exc_hold_own(). Where no object is held and a cause waits, it asks
+    sp_exc_own_by_name for the raised name; for a row it sets the cause
+    and holds the object, as sp_exc_caught_obj_make does (its three
+    statements); for any other name it does nothing, and master's call
+    after it builds what it built.
+  - The three sites print `sp_exc_hold_own(); ` ahead of master's
+    `_excobj%d = sp_exc_caught_obj();`, which stays as it is, and print
+    nothing there in a program with no such class (exc_hold_own).
+  - WHY THIS FORM and not a header function that takes the builder: by
+    the inverted test both keep master's C in a program with no such
+    class, but this one keeps master's header too, so such a program is
+    the same program, and its ensure row costs 0.00 by measure (part 8).
+    I had cut the other first: called through a pointer the entry cost 23
+    instructions where this costs 18, and it changed master's function,
+    which ruling 2 forbids. Compile time at 1,000 and 2,000 classes:
+    +0.66% and +0.40% (part 8).
+- THE RE-CUT is the replay plus `git diff f96cd46b5df4 218f1791d4a7`, the
+  second block below: 8 files, 79 insertions, 11 deletions.
+  - src/codegen.c: exc_hold_own, the entry's text and its declaration.
+  - The three sites (emit_begin in src/codegen_stmt.c,
+    emit_array_filter_loop in src/codegen_iter.c,
+    emit_call_synchronize_arms in src/codegen_call_concurrency.c).
+  - lib/sp_exc.c: sp_exc_disp_heap is inline by hand. With the piece's two
+    entries it has five callers where master has three; gcc and clang
+    inline it into all three on master and into none of five. sp_exc_new
+    is one of them: every exception of every program, with no class of the
+    piece too, ran 2 instructions more (5 for the call, 3 saved). I found
+    it by the cost row of a program with no such class (+1.99 where it must
+    be 0.00), and it is 0.00 again.
+  - test/exception_attribute_ensure_clause.rb: a third road, 40 turns, a
+    class of the piece raised under a rescue or with `cause:` and leaving
+    through an ensure with no rescue clause: a begin's (reader 8's first
+    program), a method's, `Mutex#synchronize`, `select!`. On the bare tip
+    it prints 39; on the head 0, and each cause is the one given.
+- NO OTHER SITE. The sites that still name sp_exc_new_for_catch are those
+  of the carried head (a raise of a literal RuntimeError, the C extension
+  bridge) and master's sp_exc_caught_obj_make; master added no site that
+  names sp_exc_new_sub or sp_exc_new_sub_sized.
+- FOR THE NEIGHBOUR (the ensure guard). The piece's lines in emit_begin
+  are four: the builder's name in the two statements that build what a
+  rescue clause or the code after an ensure caught (tip lines 10181 and
+  10216, with their argument lists at 10185 and 10217), and the prefix on
+  master's `_excobj%d = sp_exc_caught_obj();` (10193, argument at 10194).
+  That last one IS the ensure's entry statement, the one buf_printf that
+  sets _excmsg, _exccls and _excobj: of my three sites it is the first,
+  and what I change in it is a `%s` ahead of `_excobj%d` and one argument.
+  A change that puts another call in sp_exc_caught_obj()'s place there
+  meets mine by text in that one line, and the two replay over each other
+  in any order by keeping the prefix ahead of the call, on one condition:
+  the call leaves an object that is already held as it is, as
+  sp_exc_caught_obj() does. An object of a class of the piece that reaches
+  an arm already built at the base size is cast by the arm and written
+  past: the entry is not asked once `sp_exc_obj[sp_exc_top]` or `_excobj`
+  is set. So a change that makes an object ahead of the catch asks
+  exc_catch_builder(c) for it where it wrote sp_exc_new_for_catch, or
+  stands behind sp_exc_hold_own().
+
+## 2. Master's "An object lists its ivars in the order they were first assigned"
+
+- THE PIECE WRITES AND READS NO `_sp_set_` FIELD, NO `_sp_ord` AND NO
+  PRESENCE MARK, anywhere: its diff holds no `_sp_set`, no `= TRUE`, no
+  call of ivar_set_mark, ivar_set_kind, ivar_set_test or ivar_ranked, and
+  no word list of its own. It builds the object, zeroed, at the size of
+  the class's struct as emit_class_struct lays it out, and scans it with
+  the class's own scan. Every flag is master's: declared by
+  emit_class_struct, set by master's store emitters through ivar_set_mark,
+  read through ivar_set_test.
+- An exception class is never ranked: ivar_ranked answers no for a family
+  that holds one ("its layout is the runtime's"), so its struct has no
+  `_sp_ord` and no sp_ivrank, and docs/limitations.md says the ranking
+  leaves exception classes out. It can still hold the flag (`sp_bool
+  _sp_set_b` for an Integer attribute stored on some paths only, k5). On
+  the head that flag lies inside the object wherever the object is built,
+  so master's `_t->_sp_set_b = TRUE` after a store lands in it; on the
+  bare tip, where the object is built at 120 bytes, that store is one more
+  write past the end.
+- RANKED CLASSES, BY A RUN (k1 to k6 and k3b, six cells each): a class of
+  the piece with three attributes stored in an order that differs by the
+  turn, beside a plain class stored the same way, which master ranks
+  (sp_ivar_rank and sp_ivar_renumber are in the C of every one).
+  `instance_variables` and `inspect` on each kept exception, after 3,000
+  allocations:
+  - set through its own arm (k1), and through an ensure with no rescue
+    clause under a rescue, with the cause read (k2): the same lines on
+    both, lost 0, moved 0. The exception lists [:@a, :@b, :@c] on every
+    turn, the layout's order and every name, stored or not, where CRuby
+    lists what was assigned in the order it was; `inspect` is `#<Tagged:
+    m0>` on all three. The plain class beside it lists in CRuby's order
+    on both.
+  - raised with `cause:` inside `Mutex#synchronize` (k6): the bare tip
+    aborts under stress 2 (exit status 134, 2 of 6 cells); the head prints
+    the lines of k1's kind in all six. Cured 92, moved 18 (the listing,
+    wrong on both: past the end on the tip, the layout's on the head).
+  - kept in an ivar of a ranked class and shown through its `inspect`
+    (k4): the bare tip aborts under stress 2 (2 of 6 cells); the head
+    prints the holder's lines as CRuby does (`#<Holder:X @note="n0",
+    @err=#<Tagged: m0>>`, in assignment order), and the exception's own
+    listing in the layout's order, as in k1. Cured 106, moved 10.
+  - a subclass caught by the parent's arm, stored, raised again, caught by
+    its own arm (k3b): `instance_variables` prints [] on both, CRuby the
+    three names. With the stores made through one method for both classes
+    (k3) both end with NoMethodError for `d=`, and
+    `remove_instance_variable` on the exception (k5) ends with
+    NoMethodError on both, after the same presence lines: master's own,
+    the same on both, lost 0.
+- A WIDE CLASS WITH HEAP VALUES (twelve attributes, Strings and Arrays,
+  the neighbour's shape; h1 to h4): with no cause waiting (h1) the bare
+  tip is right in a plain run and reads 20 of 20 back wrong under stress 1
+  and 2, the values freed under the exception; with a cause waiting (h2)
+  19, 20 and 20. The head: 0 in every cell. That is the title, and it is
+  covered. The same with only two of the twelve stored on the even turns
+  and the presence read on each (h3, h4): `instance_variables.size` is 7
+  where CRuby gives 2, on the tip and on the head, the five unset boxed
+  slots listed with the two stored; with a cause waiting the bare tip reads
+  past the end (8 and 7 where 12 were stored). The head's lines for h4 are
+  byte-equal to bare master's for h3 in a plain run, in all six cells: the
+  twin. It is under "Not in this change", part 5.
+- docs/limitations.md, the presence section, read fresh on the tip: the
+  piece makes no sentence of it untrue. It says a field keeps its flag
+  "set by each store after its value is computed"; for an exception class
+  of the piece that store went past the object on master and is inside it
+  now. The texts' presence paragraph is narrowed to say which slots: one
+  the compiler types as an Integer or as a boxed value.
+
+## 3. "Before" on the bare tip, and what was cut
+
+- Nothing master now answers right had to be cut. On the bare tip, six
+  cells each: the body's first example prints 59 with --share-strings (60
+  under stress 1 and 2) and 0 without (3 and 60 under stress); the second
+  ends in a segmentation fault in 6 of 6; the third prints [1, "r1"] ([2,
+  "r2"] under stress 1, an abort under stress 2); the parent's arm 29 of
+  30; the ensure's clause 29 of 30, and its new road 39 of 40; `p
+  ParseError.new("m").line` 0 on the tip and the head, CRuby nil.
+- The six tests on the bare tip, 72 cells: 18 pass (builtin_reopened 12,
+  marked 4, share_strings 2), 54 fail. On the head 72 pass.
+- READER 8's THREE (four attributes and no initialize; raise
+  ArgumentError; in its rescue clause an inner begin that raises the class
+  by name with only an ensure; the outer arm typed to the class stores the
+  four; a fill of 3,000; the reads; then the same with `cause:`, and the
+  same inside a block): the bare tip ends by a signal (exit status 134)
+  after its first line in 6 of 6 cells, each; the head prints CRuby's
+  lines in every cell (97, 97 and 85 lines), the causes too.
+- THE NEIGHBOUR's SHAPE (twelve attr_accessor, no initialize, raised by
+  name through a begin with only an ensure whose body makes objects,
+  rescued further out, twelve Integer stores and a sum, a fill of 3,000
+  Strings), at -O 0 and -O 2, plain and both stress modes: with no cause
+  waiting (f1) both print CRuby's lines in 6 of 6; with a cause waiting,
+  raised under a rescue (f2) or with `cause:` (f3), the bare tip reads 19
+  of 20 back wrong in 6 of 6 and the head none. I checked the neighbour's
+  reading: the runtime has no size by name, and the piece's generated
+  entry has one, for a class with no initialize; a class with an
+  initialize of its own is not a row, and where one leaves that way with
+  a cause waiting it is master's object, as before.
+
+## 4. The list, by run
+
+Each program on CRuby, the bare tip and the head, six cells (with and
+without --share-strings, SPINEL_GC_STRESS 0, 1, 2). "lost" is a line right
+on the tip and wrong on the head; "cured" the reverse; "moved" wrong on
+both and not the same.
+
+- AN EXCEPTION CLASS MADE BY Class.new, WITH AN ATTRIBUTE AND NO
+  initialize:
+  - a constant assigned `Class.new(StandardError) { attr_accessor ... }`,
+    raised by the constant and caught by its arm (l1b): cured 4, lost 0.
+    The tip is right in a plain run and reads 28 and 30 of 30 wrong under
+    stress 1 and 2: the values freed under the exception.
+  - `Sub = Class.new(Tagged)`, no block, under a class of the piece (l1c):
+    cured 6 for its own arm (the tip: 29, 30 and 30 of 30 wrong); caught
+    by the parent's arm both end with NoMethodError for `tag` on an
+    instance of Tagged, the tip and the head alike (a find, below).
+  - unnamed, built by `.new`, stored, then given a name (l1f); unnamed,
+    raised by the variable, caught by an arm that names no class, then
+    named (l1g): the same lines on both, lost 0. l1f reads an attribute
+    nothing has stored as 0 where CRuby reads nil, on both.
+  - unnamed, raised by the variable and caught by `rescue k => e` with a
+    writer called on `e` (l1a, l1e): refused by both alike (`unsupported
+    call ... tag=`, the receiver is typed as an exception of no class).
+  - unnamed, caught by an arm that names no class, a method of the class
+    called on the kept value (l1d): NoMethodError at run time on both.
+- A RESCUE CLAUSE NAMING SUCH A CLASS HELD IN A VARIABLE (`k = Tagged`;
+  `rescue k => e`), the kept value stored through a method (l2a): cured 2
+  (the tip: 30 of 30 wrong under stress 2). The class raised by the
+  variable (`raise k`) and read off a value (`raise x.class`), caught by
+  the arm typed to the class (l2b): cured 8 (the tip: 29 and 30 of 30
+  under stress 1, 30 and 30 under stress 2). The class in a variable at
+  both ends and in a list (l2c): NoMethodError on both. `raise x.class`
+  caught by an arm that names no class of the program (l2d): segmentation
+  fault on both, the case the texts leave.
+- A FROZEN EXCEPTION WITH AN ATTRIBUTE SET BEFORE (l3a: stored, frozen,
+  read, a store raising FrozenError): the same lines on both, CRuby's.
+  Caught by name, stored, frozen, kept, then raised again under a rescue
+  (l3c), and its twin built by `.new` (l3d), one fact a line: the tag, the
+  Array and the message are right 30 of 30 on the head in every cell (the
+  tip: 14 of the Arrays under stress 1; 0, 0 and 30 under stress 2); lost
+  0, cured 6 each. Two lines are master's own on both: CRuby raises an
+  unfrozen copy that takes the cause, master raises the frozen object
+  with no cause. l3b is the same program counting in one sum: it reads
+  "lost 2", the tip's sum being CRuby's 30 by two wrongs; l3c takes it
+  apart.
+- THE CAUSE KEPT THROUGH AN ENSURE: a begin's ensure with no rescue
+  clause under a rescue (l4a), a method's ensure with `cause:` and a
+  Mutex's (l4b), `select!` (l4d): cured 6 each (30 of 30 wrong on the
+  tip), every cause the one given. The same exception caught by an arm
+  that names no class and stored through a method (l4c): the tip ends in
+  a segmentation fault in 6 of 6 cells, the head prints CRuby's 17 lines.
+- THE DEFAULT MESSAGE OF A SUBCLASS (`raise Tagged`, `raise Deep`, `raise
+  Outer::Inner`, `.new` with and without a message, by the own arm and by
+  an arm that names no class; l5a): the same lines on both, CRuby's.
+
+20 programs, 120 cells: lost 0 but l3b's two, cured 152, moved 2 (l3b),
+exit status differs in 6 cells (l4c). The 11 of parts 1 and 3 (f1 to f3,
+reader 8's three, m1, m2, i1, i2, rb1), 66 cells: lost 0, cured 1,690,
+moved 0, exit status differs in 24 cells (the tip's signals).
+
+## 5. The presence reads
+
+`instance_variables`, `instance_variable_defined?`, `defined?(@x)` in a
+method, `inspect`, `instance_variable_get`, `remove_instance_variable`, and
+all of them on one line: seven reads, each with nothing stored, after a
+store, after a nil store and after a second store, of a class of the piece
+under a parent of the piece.
+
+- By ten routes: `.new`; the own arm; an arm typed to StandardError; the
+  bare arm; an ensure with a rescue clause; an ensure with none under a
+  rescue; the modifier (`raise PErr, "m" rescue $!`); a raise with an
+  appended String; the parent's arm then the own arm; four kept and read
+  after 500 allocations. And the StandardError arm and the modifier again
+  with the read behind the class's own arm (the arm raising again, bare
+  and by `raise e0`; the modifier's value raised and caught by the own
+  arm), since a read on a value typed StandardError is refused by both
+  alike (14 programs). 91 programs, 546 cells: lost 0, cured 0, moved 0,
+  no exit status differs.
+- THE TWIN. Every route's lines on the head against bare master's lines
+  for `.new` of the same read, with and without the flag: 136 of 140 are
+  byte-equal; the 4 are `inspect` on the two routes whose message is not
+  "m" by the program's own text. A flag of the class's struct sits inside
+  the size the piece builds and is zeroed with it.
+- WHAT IS WRONG IS MASTER'S OWN, by `.new` alike: `p
+  ParseError.new("m").instance_variables` prints [:@line, :@ctx] on the
+  tip and the head, CRuby []; `instance_variable_defined?(:@ctx)` true,
+  CRuby false. The body names it under "Not in this change".
+
+## 6. The failing twin (ruled: reached, not made)
+
+The program: a class with `attr_accessor :a` and a method that stores a
+String in it; 12 turns of `s = +"m"; s << i.to_s; raise U, s`, caught by
+`rescue U => e`, kept, the store on the odd ones; then `p
+e.instance_variable_get(:@a)` and `p e.a` on each. By script, six cells,
+lines counted by position:
+
+- The head: 12 lines not CRuby's in every cell, the 12 reads of an
+  attribute nothing has stored, 0 for nil. No cell ends loud.
+- The bare tip, the same program: without the flag 12, 20, and an abort
+  with no line under stress 2; with --share-strings 22, 22 and the abort.
+  The 12 unset reads print 0 wherever master reaches them; the others are
+  the stores it lost past the end. No line is right on the tip and wrong
+  on the head.
+- The twins on the bare tip: `raise U.new(s)` prints the head's lines
+  without the flag, and with --share-strings prints nil, CRuby's line:
+  master types the attribute as a String there (`sp_String * iv_a`) and as
+  a boxed value in the program itself (`sp_RbVal iv_a`). The copy forms,
+  `raise U.new(s.dup)`, `raise U.new("m#{i}")`, `raise U.new("" + s)`,
+  `raise U.new(s.dup.freeze)`, keep the boxed slot and print, byte for
+  byte, the head's lines for the program, in 3 of 3 cells each, with and
+  without the flag.
+- The body says so in one paragraph under "Not in this change".
+
+## 7. The texts, v2 against v1
+
+The fourth block of the first comment is every changed line. What changed:
+
+- The message and the body gain the ensure with no rescue clause (39 of
+  40) and what answers it, and sp_exc_disp_heap's inline.
+- Reader 8's three text notes: clang's first row is stated (+6.01 on this
+  tip; it was +15.00 on the old base, where gcc read +5.00); every cost
+  and compile figure is measured again on this head and written as
+  measured; "Nor a class read off a value" is narrowed to an arm that
+  names no class of the program (the arm typed to the class is cured:
+  l2b).
+- "Not in this change" gains the paragraph on the form of the raise (part
+  6) and the paragraph on presence reads (parts 2 and 5).
+- The table gains two rows, the ensure with no rescue clause.
+- The checks paragraph is this head's, the full round.
+
+## 8. Costs, measured on this head
+
+Run cost, instructions for one exception built, callgrind, (150,000 turns
+less 50,000) / 100,000, both sides built on the tip:
+
+| the program | gcc: master | change | own | glibc str/mem | clang: master | change | own | glibc str/mem |
+|---|---|---|---|---|---|---|---|---|
+| a builtin, `rescue StandardError => e`, in a program with such a class | 2389.67 | +5.00 | +5.00 | 0.00 | 2515.58 | +6.01 | +6.01 | 0.00 |
+| the class by its own arm | 5620.06 | +68.10 | +2.10 | +66.00 | 5676.26 | +2.10 | +2.10 | 0.00 |
+| `.new` alone | 4473.72 | +24.02 | +2.02 | +22.00 | 4558.23 | -27.98 | +2.02 | -30.00 |
+| a subclass by its parent's arm | 6288.51 | +85.05 | +24.80 | +60.25 | 6336.28 | +66.49 | +26.24 | +40.25 |
+| the class by `rescue StandardError => e` | 6085.68 | -188.52 | -147.63 | -40.89 | 6179.61 | -215.25 | -141.36 | -73.89 |
+| a builtin through an ensure with no rescue clause, under a rescue | 4931.71 | +18.00 | +18.00 | 0.00 | 4821.82 | +20.00 | +20.00 | 0.00 |
+| the class the same way, by its own arm | 8713.73 | -167.93 | -159.87 | -8.05 | 8591.84 | -223.08 | -149.03 | -74.05 |
+| a class with no attribute (the C is master's) | 5832.69 | +0.00 | | | | | | |
+| a class with an initialize (the C is master's) | 1106.29 | +0.00 | | | | | | |
+| the ensure row in a program with no such class (the C is master's) | 4931.71 | -0.01 | | | 4821.82 | +0.00 | | |
+
+- The string functions are called the same number of times on both sides
+  in the rows that cost: `strcmp` 17,400,000, 15,900,000 and 19,800,000 in
+  150,000 turns, `strncmp` 600,156, 600,156 and 750,156.
+- The 18 of the ensure row is all in the program's body: two exceptions
+  are built a turn there, so two range tests, and the test ahead of
+  master's call.
+- Against the carried head's figures: the own arm and `.new` are 2 where
+  they were 4, the parent's arm 25 where it was 27, the builtin 5 as it
+  was. The glibc column of the parent's arm is +60.25 where it was +22.25,
+  for the same calls.
+
+Compile cost, callgrind of `spinel -c`, both compilers in one run; "own"
+is the change outside libc's str and mem functions:
+
+| the program | master | this | total | own | own, a class |
+|---|---|---|---|---|---|
+| `p 1` | 2,018,735 | 2,021,540 | +0.14% | -340 | |
+| seven lines with a rescue, no class | 7,826,009 | 7,829,118 | +0.04% | +273 | |
+| 300 plain classes with attributes | 369,534,150 | 369,532,987 | -0.0003% | +87,685 | +292 |
+| 300 exception classes, no attribute | 117,365,033 | 117,338,943 | -0.02% | +9,520 | +32 |
+| 300 exception classes, attributes and an `initialize` | 723,387,423 | 723,737,666 | +0.05% | +353,756 | +1,179 |
+| one such class | 4,311,997 | 4,406,796 | +2.20% | +52,656 | |
+| 300 such classes | 405,305,682 | 410,951,802 | +1.39% | +3,375,496 | +11,252 |
+| 300 such classes, each raised and read | 4,402,504,621 | 4,407,124,382 | +0.10% | +3,944,296 | +13,148 |
+| 1,000 such classes | 2,477,856,577 | 2,494,331,304 | +0.66% | +10,908,578 | +10,909 |
+| 2,000 such classes | 8,220,966,229 | 8,253,712,435 | +0.40% | +22,023,707 | +11,012 |
+| optcarrot | 8,289,308,555 | 8,281,913,821 | -0.09% | +2,003 | |
+
+- Where the total and the own part disagree it is glibc's compares: `p 1`
+  runs +3,145 in them and -340 outside; optcarrot -7,396,737 and +2,003.
+  They move with the run as well as with the build: a second run of the
+  same two compilers gave master 2,016,082 for `p 1` (0.13% under the
+  first) and totals of +0.15%, 0.00% (seven lines), 0.00% (300 plain
+  classes) and -0.09% (optcarrot); the body gives both. `strncmp` is
+  called the same number of times on both at 300 plain classes (649,862)
+  and at 300 with an initialize (965,552). The -340 of `p 1` is malloc's:
+  by function the piece's own ran 47 instructions there on the previous
+  tip, the same patch.
+- These are my programs, the carried head's. Reader 8's own programs gave
+  103 and 1,040 a class where mine gave 191 and 1,149 on the old base;
+  mine give 292 and 1,179 on this tip, and the texts carry those. A class
+  of the piece costs about 19,000 in all (11,000 outside libc), where it
+  was about 18,000 (8,700); the first one about 95,000, where it was
+  65,000: the three entries' text is written once.
+
+## 9. Checks of record: the full round on this head
+
+Both sides built on 2b0ebc0a6bfd from nothing (`make clean`, then `make`;
+52 warnings each) with the rbs parser, the head at tree 218f1791d4a7:
+
+- The six tests in 12 cells each (gcc and clang, with and without
+  --share-strings, SPINEL_GC_STRESS 0, 1, 2): 72 pass; on the bare tip 18
+  pass and 54 fail. Two neighbours (exception_user_method_generic_receiver,
+  share_strings_exception_literal): 24 pass.
+- tools/cident.sh against the bare tip: 6,812 identical, 12 differ, 0
+  refusal changes; with CIDENT_FLAGS=--share-strings 6,811 identical, the
+  same 12 differ, 0 refusal changes, 1 refused by both alike.
+  The 12 are five of the tests (all but
+  exception_attribute_builtin_reopened) and seven of the corpus that hold
+  such a class (builtin_ivar_boxed_reflection,
+  class_value_new_exception_subclass, exception_bare_new_in_class_method,
+  exception_message_super_private_def, exception_object_surface,
+  ivar_set_poly_builtin_reopen, systemcallerror_message_from_errno).
+  Master's two new tests of the ivar order (ivar_presence_order,
+  ivar_presence_init_order) are among the identical.
+- Those 12 and the sixth test in the corpus lane at -O1
+  (build/test-results) and with SPINEL_SHARE_STRINGS=1
+  (build/test-results-shared): 13 PASS in each.
+- tools/refusals.sh: pass, 650 records. `make reject-test`: pass.
+- `LC_ALL=C.UTF-8 ruby tools/gate.rb check` with the commit staged on a
+  clean tree at the tip: rc 0 (it warns that no Ruby 4.0 is here).
+- In the head's tree, by `make`: int-min-test, share-strings-test,
+  gc-stress-test, shadow-check (888 programs), inline-rbs-test (with
+  inline-rbs-no-parser-test) and share-verify-test (1,155 programs, 0 new,
+  0 failures; its 8 stale entries are in three programs that hold no
+  exception class, the same eight as on the old base): pass, each.
+- optcarrot: the C is byte-equal on the bare tip and the head (12,150
+  lines).
+- The mail: `git am` on 2b0ebc0a6bfd with the mail's date as the
+  committer date and committer Claude gives a5879e969d0f.
+- The carried head's probes, again on this tip: the hooks' 18
+  programs (lost 0, cured 6, moved 30, exit status differs in 6 cells);
+  the body's 4 (lost 0, cured 17, exit status differs in 8); the 92 roads
+  (lost 0, moved 24, the four that print an address); 13 more (lost 0,
+  cured 22, exit status differs in 4); the decline's 51 twins (lost 0,
+  cured 0, moved 0); the frozen literal's 6 (lost 0); reader 8's first 3
+  (lost 0, cured 4). 187 programs, 1,122 cells, lost 0. The five pairs of
+  an unset read reached: 54 wrong lines on the head, 54 the twin's line on
+  the bare tip. The read past the end on the bare tip: 0 of 230,400 lines
+  equal CRuby's, in 960 runs.
+- With the list (20), the 11 of parts 1 and 3, the presence reads (91),
+  the 7 ranked and the 4 wide of part 2, and the failing twin's six: 326
+  programs.
+
+Before master's last two moves the piece ran this round three times: twice
+on 4689b503c791 (without the rbs parser, the ensure answered through a
+parameter on master's function, which is gone) and once on 098f50389d2b
+with this patch, where every set gave the counts above (6,809 identical
+and 12 there; the four long legs but share-verify-test, stopped when
+master moved).
+
+## Master's own, recorded (ruling 4), and side finds, not worked
+
+None of these touches a claim of the body: each is the same on the bare
+tip and on the head, and none is about an attribute that was set.
+
+- Raising a frozen exception: CRuby raises an unfrozen copy that takes the
+  cause; master raises the frozen object, with no cause.
+- A subclass made by `Class.new(Parent)` with no block, caught by the
+  parent's arm, and a method of an unnamed Class.new class called through
+  a boxed value: NoMethodError at run time, with the internal name.
+- A rescue clause naming a class held in a local variable binds a value
+  typed as an exception of no class: a writer called on it is refused.
+- `instance_variables` lists an attribute nothing has stored where its
+  slot is an Integer or a boxed value, in the layout's order, and
+  `defined?(@x)` in a method reads nil after a store of an Array, for an
+  exception class built by `.new`; a subclass's listing is [] (k3b);
+  `remove_instance_variable` on an exception and a writer called through
+  one method for an exception class and a plain class end with
+  NoMethodError.
+- A class with attributes AND an initialize of its own, raised by name
+  under a rescue through an ensure with no rescue clause, is master's
+  sp_exc_caught_obj() object, 120 bytes: not a row of the piece, not
+  run here.
+===== 2. the re-cut against the replay =====
+diff --git a/lib/sp_exc.c b/lib/sp_exc.c
+index 1efb8a09c..09e0569db 100644
+--- a/lib/sp_exc.c
++++ b/lib/sp_exc.c
+@@ -185,8 +185,10 @@ sp_bool sp_exc_cls_unnamed(const char *shown) {
+   return shown && strncmp(shown, "#<Class:", 8) == 0;
+ }
+ /* The default message text of class `cn` when its display differs from the key,
+-   as a string on the heap the caller roots; sp_str_empty when it does not. */
+-static const char *sp_exc_disp_heap(const char *cn) {
++   as a string on the heap the caller roots; sp_str_empty when it does not.
++   Inline by hand: gcc and clang inline it on their own into three callers and
++   into none of five, and sp_exc_new is one of them. */
++static SP_INLINE const char *sp_exc_disp_heap(const char *cn) {
+   if (!sp_class_display_fn) return sp_str_empty;
+   const char *d = sp_exc_cls_display(cn);
+   if (d == cn || strcmp(d, cn) == 0) return sp_str_empty;
+diff --git a/src/codegen.c b/src/codegen.c
+index 068b839ab..c0e829ec0 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -9326,8 +9326,18 @@ const char *exc_catch_builder(Compiler *c) {
+   return g_xbn_n ? "sp_exc_catch_own" : "sp_exc_new_for_catch";
+ }
+ 
++/* What stands ahead of sp_exc_caught_obj() where an ensure with no rescue
++   clause catches an exception to raise it again: that function builds one
++   raised without an object, when a cause waits for it, at the base size, so
++   such a class is built first, as itself (sp_exc_hold_own). Nothing in a
++   program that has none. */
++const char *exc_hold_own(Compiler *c) {
++  exc_by_name_rows(c);
++  return g_xbn_n ? "sp_exc_hold_own(); " : "";
++}
++
+ /* The table, each name behind the byte a literal String carries (SPL), so a
+-   row serves wherever the literal did, and the two entries that read it. */
++   row serves wherever the literal did, and the entries that read it. */
+ static void emit_exc_by_name_table(Compiler *c, Buf *b) {
+   exc_by_name_rows(c);
+   if (!g_xbn_n) return;
+@@ -9338,7 +9348,8 @@ static void emit_exc_by_name_table(Compiler *c, Buf *b) {
+   for (int i = 0; i < g_xbn_nc; i++)
+     if (g_xbn_row[i] >= 0) buf_printf(b, "%s\"\\xff\" \"%s\"", g_xbn_row[i] ? ", " : "", exc_by_name_row_name(c, i));
+   buf_puts(b, "};\nstatic void *sp_exc_own_by_name(const char *cls, const char *msg, int caught);\n"
+-              "static sp_Exception *sp_exc_catch_own(const char *cls, const char *msg);\n");
++              "static sp_Exception *sp_exc_catch_own(const char *cls, const char *msg);\n"
++              "static void sp_exc_hold_own(void);\n");
+ }
+ 
+ /* The rest of a sp_exc_new_sub_ivars call for such a class: its own scan,
+@@ -16783,7 +16794,14 @@ static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
+     buf_puts(b, "  }\n  return NULL;\n}\n"
+                 "SP_UNUSED static sp_Exception *sp_exc_catch_own(const char *cls, const char *msg){\n"
+                 "  void *u = sp_exc_own_by_name(cls, msg, 1);\n"
+-                "  return u ? (sp_Exception *)u : sp_exc_new_for_catch(cls, msg);\n}\n");
++                "  return u ? (sp_Exception *)u : sp_exc_new_for_catch(cls, msg);\n}\n"
++                /* sp_exc_caught_obj_make's lines, for a row only */
++                "SP_UNUSED static void sp_exc_hold_own(void){\n"
++                "  if (sp_exc_obj[sp_exc_top] || !sp_pending_cause) return;\n"
++                "  sp_Exception *u = (sp_Exception *)sp_exc_own_by_name(sp_exc_cls[sp_exc_top], sp_exc_msg[sp_exc_top], 1);\n"
++                "  if (!u) return;\n"
++                "  sp_gc_wb((void *)u); u->cause = (sp_Exception *)sp_pending_cause;\n"
++                "  sp_exc_obj[sp_exc_top] = u;\n}\n");
+   }
+ 
+   /* User exception #message / #to_s overrides: a cls_name-keyed dispatcher so
+diff --git a/src/codegen_call_concurrency.c b/src/codegen_call_concurrency.c
+index ed9f964da..60d0d01c0 100644
+--- a/src/codegen_call_concurrency.c
++++ b/src/codegen_call_concurrency.c
+@@ -391,8 +391,8 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
+     if (is_mx) {
+       g_ensure_depth--;
+       g_exc_frame_depth--;
+-      buf_printf(b, "sp_exc_top--; }\nelse { sp_exc_top--; sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; if (sp_unwind_kind == SP_UNWIND_NONE) { _excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_caught_obj(); } } ",
+-                 eid, eid, eid, eid);
++      buf_printf(b, "sp_exc_top--; }\nelse { sp_exc_top--; sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; if (sp_unwind_kind == SP_UNWIND_NONE) { _excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; %s_excobj%d = sp_exc_caught_obj(); } } ",
++                 eid, eid, eid, exc_hold_own(c), eid);
+       buf_printf(b, "_ensure%d: ; sp_Mutex_unlock(_t%d); ", eid, mtmp);
+       buf_puts(b, "if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume(); ");
+       /* a deferred `next` or `break` a nested ensure handed up, passed on the
+diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+index 5a86bc7a9..fdfb472a9 100644
+--- a/src/codegen_internal.h
++++ b/src/codegen_internal.h
+@@ -2198,6 +2198,7 @@ int class_needs_scan(ClassInfo *ci);
+ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b);
+ int class_exc_built_by_name(Compiler *c, int cid);
+ const char *exc_catch_builder(Compiler *c);
++const char *exc_hold_own(Compiler *c);
+ int class_exc_by_name_row(Compiler *c, int cid);
+ void emit_exc_cls_name(Compiler *c, int cid, const char *name, Buf *b);
+ int class_exc_has_by_name_sub(Compiler *c, int cid);
+diff --git a/src/codegen_iter.c b/src/codegen_iter.c
+index a80b9dd9b..aab37080b 100644
+--- a/src/codegen_iter.c
++++ b/src/codegen_iter.c
+@@ -5000,8 +5000,8 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
+   emit_indent(b, indent + 1); buf_puts(b, "sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];\n");
+   emit_indent(b, indent + 1); buf_puts(b, "if (sp_unwind_kind == SP_UNWIND_NONE) {\n");
+   emit_indent(b, indent + 2);
+-  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_caught_obj();\n",
+-             eid, eid, eid, eid);
++  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; %s_excobj%d = sp_exc_caught_obj();\n",
++             eid, eid, eid, exc_hold_own(c), eid);
+   emit_indent(b, indent + 1); buf_puts(b, "}\n");
+   emit_indent(b, indent); buf_puts(b, "}\n");
+   g_ensure_depth--;
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index b06cc2871..350c55e90 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -10202,8 +10202,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar)
+       /* No rescue: save exception info for re-raise after ensure runs.
+          sp_exc_top has just been decremented so sp_exc_top is the right index. */
+       emit_indent(b, indent + 2);
+-      buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_caught_obj();\n",
+-                 eid, eid, eid, eid);
++      buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; %s_excobj%d = sp_exc_caught_obj();\n",
++                 eid, eid, eid, exc_hold_own(c), eid);
+     }
+     emit_indent(b, indent + 1); buf_puts(b, "}\n");
+     emit_indent(b, indent); buf_puts(b, "}\n");
+diff --git a/test/exception_attribute_ensure_clause.rb b/test/exception_attribute_ensure_clause.rb
+index 434d04e94..f9bab855e 100644
+--- a/test/exception_attribute_ensure_clause.rb
++++ b/test/exception_attribute_ensure_clause.rb
+@@ -52,3 +52,48 @@ held.each_with_index do |e, i|
+   bad += 1 unless e.line == i + 1 && e.ctx == [i, "c#{i}"] && e.message == "p#{i}"
+ end
+ p bad
++
++# raised under a rescue, so with a cause, and leaving through an ensure that
++# has no rescue clause: a begin's, a method's, a Mutex's, select!'s own
++def through(i, c)
++  raise Tagged, "t#{i}", cause: c
++ensure
++  i + 1
++end
++lock = Mutex.new
++late = []
++40.times do |i|
++  c = ArgumentError.new("c#{i}")
++  begin
++    case i % 4
++    when 0
++      begin
++        raise c
++      rescue ArgumentError
++        begin
++          raise Tagged, "t#{i}"
++        ensure
++          late.size
++        end
++      end
++    when 1 then through(i, c)
++    when 2 then lock.synchronize { raise Tagged, "t#{i}", cause: c }
++    else
++      begin
++        raise c
++      rescue ArgumentError
++        [1, 2, 3].select! { |v| raise Tagged, "t#{i}" if v == 2; true }
++      end
++    end
++  rescue Tagged => e
++    e.tag = "tag-#{i}"
++    e.at = [i, "a#{i}"]
++    late << e
++  end
++end
++2000.times { |i| junk << "y#{i}" }
++bad = 0
++late.each_with_index do |e, i|
++  bad += 1 unless e.tag == "tag-#{i}" && e.at == [i, "a#{i}"] && e.message == "t#{i}" && e.cause.message == "c#{i}"
++end
++p bad, late.size
+diff --git a/test/exception_attribute_ensure_clause.rb.expected b/test/exception_attribute_ensure_clause.rb.expected
+index 54d22570f..866f81d32 100644
+--- a/test/exception_attribute_ensure_clause.rb.expected
++++ b/test/exception_attribute_ensure_clause.rb.expected
+@@ -2,3 +2,5 @@
+ "first"
+ 2000
+ 0
++0
++40
