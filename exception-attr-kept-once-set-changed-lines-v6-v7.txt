@@ -1,0 +1,257 @@
+message: diff of the superseded hand-over's against this one
+110,113c110,113
+< it raises the class or builds it; the rescue then knows the class by
+< one range test on the pointer (sp_exc_own_by_name), whatever the number
+< of classes and the length of their names, and sp_user_exc_parent is not
+< asked a second time. Where sp_exc_new_for_catch, sp_exc_caught_obj or
+---
+> it raises the class; the rescue then knows the class by one range test
+> on the pointer (sp_exc_own_by_name), whatever the number of classes and
+> the length of their names, and sp_user_exc_parent is not asked a second
+> time. Where sp_exc_new_for_catch, sp_exc_caught_obj or
+127,131c127
+< no third copy of the body: with three, gcc 13 at the Makefile's flags
+< stops inlining sp_msg_heapify into sp_exc_new in the threaded runtime,
+< 16 instructions more for every exception of a threaded program. In the
+< unthreaded runtime gcc calls it out of line as it did, and clang 18
+< does in both.
+---
+> no third copy of the body.
+142,175c138,176
+< argument, and 27 and 28 where an arm typed to a parent of the same kind
+< catches a subclass raised by name, which is built as itself now, 13
+< and 14 where it catches the parent itself, for asking the table which
+< was raised. The one more argument is the scan, and only a class with
+< an ivar to mark pays it (the slots of one that stores nothing are
+< boxed): with two ivars that only hold Integers the same two programs
+< pay nothing of the change's own, 0 and 0. Around these, glibc's string
+< compares count 22 to 66 more with gcc, and from 40 fewer to 2 more
+< with clang, in these programs (86 and 44 fewer where the parent itself
+< is caught), for the same calls (15,900,000 to 19,800,000 of strcmp in
+< 150,000 turns, the same on both sides): the class's name is a row of
+< the table and no longer the literal, and strcmp and strncmp take their
+< page-crossing path or not by the two addresses' offsets in their
+< pages. With gcc that is all the class of Integer ivars pays, 66 at its
+< arm and 22 at `.new`. An arm that names no class of the program builds
+< such a class in 146 and 215 fewer. Where nothing is raised a program
+< that has such a class runs what it did, by measure: of thirty programs
+< with an ensure, a rescue, an else clause under an ensure, a
+< synchronize body or a filter block that nothing is raised through,
+< twenty-eight have such a class, and of those none costs more with gcc,
+< and with clang twenty-six cost the same and two cost more, each at a
+< rescue arm typed to such a class that is never taken, 2 instructions a
+< turn (98 to 100) for a begin with a rescue typed to the class and an
+< ensure, and 1 (76 to 77) for a rescue typed to the parent of such a
+< class: the arm's builder takes one more argument, the class's scan,
+< and asks the table first where a class built by name descends from the
+< arm's. Compiling a program that only defines such classes runs 16,300
+< to 19,300 more instructions a class (callgrind of `spinel -c`, spinel
+< built by gcc 13 at the Makefile's flags): 1.3% more at 300 of them,
+< 0.5% at 1,000, 0.3% at 2,000. A class with an ivar that is no such
+< class is asked once what it is: 292 instructions for one that is no
+< exception, 1,148 for an exception class with an initialize of its own.
+< A program with no class of its own compiles as it did, to within 340
+< instructions and glibc's string compares.
+---
+> argument, and 30 and 31 where an arm typed to a parent of the same
+> kind catches a subclass raised by name, which is built as itself now;
+> where that arm catches the parent itself it compares the raised name
+> with its own row before the table is asked and builds the parent by
+> its own call, 7 and 7, for the compare and the one more argument. The
+> one more argument is the scan, and only a class with an ivar to mark
+> pays it (the slots of one that stores nothing are boxed): with two
+> ivars that only hold Integers the same two programs pay nothing of the
+> change's own, 0 and 0, and the parent itself at such an arm 3 and -1,
+> the compare alone. Around these, glibc's string compares count 33 to
+> 66 more with gcc, and from 51 fewer to 2 more with clang, in these
+> programs (86 and 44 fewer where the parent itself is caught), for the
+> same calls (15,900,000 to 19,800,000 of strcmp in 150,000 turns, the
+> same on both sides): a raise passes the class's row in the table and
+> no longer the literal, the program's other strings lie where the table
+> leaves them, and strcmp and strncmp take their page-crossing path or
+> not by the two addresses' offsets in their pages. With gcc that is all
+> the class of Integer ivars pays, 66 at its arm and 53 at `.new`. An
+> arm that names no class of the program builds such a class in 146 and
+> 215 fewer. Where nothing is raised a program that has such a class
+> runs what it did, by measure: of thirty-two programs with an ensure, a
+> rescue, an else clause under an ensure, a synchronize body or a filter
+> block that nothing is raised through, thirty have such a class, and of
+> those none costs more with gcc, and with clang twenty-eight cost the
+> same and two cost more, each at a rescue arm typed to such a class that
+> is never taken: 2 instructions a turn (98 to 100) for a begin with a
+> rescue typed to the class and an ensure, where the arm's builder takes
+> one more argument, the class's scan, and 1 (76 to 77) for a rescue
+> typed to the parent of such a class, both of Integer ivars alone,
+> where the arm holds its compare and clang takes the address of
+> sp_exc_msg inside the loop and no longer ahead of it. Compiling a
+> program that only defines such classes runs 16,500 to 19,600 more
+> instructions a class (callgrind of `spinel -c`, spinel built by gcc 13
+> at the Makefile's flags): 1.3% more at 300 of them, 0.5% at 1,000, 0.3%
+> at 2,000. A class with an ivar that is no such class is asked once what
+> it is: 292 instructions for one that is no exception, 1,148 for an
+> exception class with an initialize of its own. A program with no class
+> of its own compiles as it did, to within 340 instructions and glibc's
+> string compares.
+183c184,186
+< there as it was. A builtin exception the program reopens is not such a
+---
+> there as it was. An arm whose class has such a class under it compares
+> the raised name with its own row first, and asks the table for any
+> other name. A builtin exception the program reopens is not such a
+214,216c217
+< Nor `cause: nil` on a raise under a rescue that leaves through a
+< method's ensure: `e.cause` is the exception that was in flight, where
+< CRuby gives nil, for such a class as for a builtin exception.
+---
+> No refusal is added or lifted.
+body: diff of the superseded hand-over's against this one
+95,99c95,102
+< `--share-strings` and without. With four attributes, each read back, the
+< program is right in a plain run, by where the stores land, and faults under
+< `SPINEL_GC_STRESS=2`. With two, in a loop that keeps the exceptions and
+< raises through a `begin`'s ensure, nothing faults and 30 of 30 read back
+< wrong (the same test, whose last part is the program above).
+---
+> `--share-strings` and without. It is the same segmentation fault where the
+> ensure is an inner `begin`'s and the clause that binds the exception is an
+> outer `begin`'s, with an ensure of its own or without. With four attributes,
+> each read back, the program is right in a plain run, by where the stores
+> land, and faults under `SPINEL_GC_STRESS=2`. With two, in a loop that keeps
+> the exceptions and raises through a `begin`'s ensure, nothing faults and 30
+> of 30 read back wrong (the same test, which ends with the program above and
+> with the one whose ensure is an inner `begin`'s).
+132,141c135,143
+< passes a class's row where it raises or builds the class, so the rescue
+< knows the class by a range test on the pointer and builds it with the same
+< builder; `sp_user_exc_parent` is not asked a second time. Where the
+< runtime's `sp_exc_new_for_catch`, `sp_exc_caught_obj` or `sp_exc_ensure_obj`
+< would build the exception, a program that has such a class calls an entry of
+< its own generated code in that function's place: a test that hands a row to
+< the program's maker, out of line, and anything else to the runtime's
+< function. None of the three changes. The catch alone, at the right size but
+< with the base scan, would trade the write past the end for the freed value
+< above.
+---
+> passes a class's row where it raises the class, so the rescue knows the
+> class by a range test on the pointer and builds it with the same builder;
+> `sp_user_exc_parent` is not asked a second time. Where the runtime's
+> `sp_exc_new_for_catch`, `sp_exc_caught_obj` or `sp_exc_ensure_obj` would
+> build the exception, a program that has such a class calls an entry of its
+> own generated code in that function's place: a test that hands a row to the
+> program's maker, out of line, and anything else to the runtime's function.
+> None of the three changes. The catch alone, at the right size but with the
+> base scan, would trade the write past the end for the freed value above.
+148,152c150
+< `sp_exc_new_sub_ivars` and holds no third copy of the body: with three, gcc
+< 13 at the Makefile's flags stops inlining `sp_msg_heapify` into `sp_exc_new`
+< in the threaded runtime, 16 instructions more for every exception of a
+< threaded program. In the unthreaded runtime gcc calls it out of line as it
+< did, and clang 18 does in both.
+---
+> `sp_exc_new_sub_ivars` and holds no third copy of the body.
+159,161c157,161
+< (`class_needs_scan` is the test master has for it). A builtin exception the
+< program reopens (`class RuntimeError < StandardError; attr_accessor :code;
+< end`) is not such a class.
+---
+> (`class_needs_scan` is the test master has for it). A rescue whose class
+> has such a class under it compares the raised name with its own row first,
+> and asks the table for any other name. A builtin exception the program
+> reopens (`class RuntimeError < StandardError; attr_accessor :code; end`) is
+> not such a class.
+171,179c171,179
+< | a builtin, caught by `rescue StandardError => e` | 2396.72 | +6.00 | 2470.65 | +5.00 |
+< | the class, raised by name, caught by `rescue PErr => e` | 5484.06 | +70.09 | 5501.24 | +4.10 |
+< | `PErr.new("x")` alone | 4337.72 | +26.02 | 4469.22 | -35.98 |
+< | a subclass raised by name, caught by an arm typed to its parent, both such classes | 6157.50 | +60.05 | 6203.27 | +30.49 |
+< | the class, raised by name, caught by `rescue StandardError => e` | 5971.74 | -145.54 | 6073.67 | -215.26 |
+< | a builtin leaving through an ensure with no rescue clause | 2599.48 | +8.01 | 2607.55 | +5.00 |
+< | the class, leaving the same way, caught by `rescue PErr => e` | 6260.53 | -135.74 | 6283.58 | -236.83 |
+< | a builtin raised under a rescue, leaving through such an ensure | 4942.81 | +17.02 | 4862.95 | +20.00 |
+< | the class, raised and leaving the same way, caught by `rescue PErr => e` | 8603.85 | -123.79 | 8536.97 | -226.95 |
+---
+> | a builtin, caught by `rescue StandardError => e` | 2402.72 | +6.04 | 2470.65 | +5.00 |
+> | the class, raised by name, caught by `rescue PErr => e` | 5490.05 | +70.09 | 5501.24 | +4.10 |
+> | `PErr.new("x")` alone | 4337.72 | +57.01 | 4469.22 | -46.98 |
+> | a subclass raised by name, caught by an arm typed to its parent, both such classes | 6163.50 | +63.06 | 6203.27 | +33.48 |
+> | the class, raised by name, caught by `rescue StandardError => e` | 5977.74 | -145.54 | 6073.67 | -215.26 |
+> | a builtin leaving through an ensure with no rescue clause | 2602.49 | +8.00 | 2614.55 | +5.00 |
+> | the class, leaving the same way, caught by `rescue PErr => e` | 6263.51 | -135.70 | 6290.58 | -236.85 |
+> | a builtin raised under a rescue, leaving through such an ensure | 4932.82 | +17.00 | 4866.95 | +20.01 |
+> | the class, raised and leaving the same way, caught by `rescue PErr => e` | 8593.84 | -123.78 | 8540.97 | -226.96 |
+185,188c185,189
+< third and fourth rows. Of those three rows' change, 66.00, 22.00 and 33.25
+< with gcc and 0.00, -40.00 and 2.25 with clang are glibc's string compares,
+< called the same number of times on both sides: the class's name is a row of
+< a table and no longer the literal, and `strcmp` and `strncmp` take their
+---
+> third and fourth rows. Of those three rows' change, 66.00, 53.00 and 33.25
+> with gcc and 0.00, -51.00 and 2.25 with clang are glibc's string compares,
+> called the same number of times on both sides: a raise passes the class's
+> row in a table and no longer the literal, the program's other strings lie
+> where the table leaves them, and `strcmp` and `strncmp` take their
+190,200c191,204
+< change's own there is 4.09, 4.02 and 26.80 with gcc and 4.10, 4.02 and 28.24
+< with clang, for one more argument and, in the fourth row, the subclass's own
+< larger object. The one more argument is the class's scan, and only a class
+< with an attribute to mark pays it (one the program stores nothing in, as in
+< these rows, has its slots boxed): with two attributes that only ever hold
+< Integers, the second and third rows' programs are built by master's own call
+< and the change's own is 0.00 and 0.01 with gcc and -0.03 and -0.01 with
+< clang, so that all such a class pays is glibc's share with gcc, the same
+< 66.00 and 22.00. Where the fourth row's arm catches the parent itself, the
+< change's own is 13.01 with gcc and 14.02 with clang, for asking the table
+< which of the two was raised, and glibc's share in that program is -86.00
+---
+> change's own there is 4.09, 4.01 and 29.81 with gcc and 4.10, 4.02 and 31.23
+> with clang, for one more argument and, in the fourth row, the arm's compare,
+> the table and the subclass's own larger object. The one more argument is the
+> class's scan, and only a class with an attribute to mark pays it (one the
+> program stores nothing in, as in these rows, has its slots boxed): with two
+> attributes that only ever hold Integers, the second and third rows' programs
+> are built by master's own call and the change's own is 0.00 and 0.00 with
+> gcc and 0.00 and -0.01 with clang, so that all such a class pays is glibc's
+> share with gcc, the same 66.00 and 53.00. Where the fourth row's arm catches
+> the parent itself, the arm compares the raised name with its own class's row
+> before the table is asked and builds the parent by its own call: the
+> change's own is 7.01 with gcc and 7.02 with clang, the compare and the one
+> more argument, and 2.98 and -0.99 for a parent of two Integer attributes,
+> the compare alone; glibc's share in the first of those programs is -86.00
+202c206
+< what it did, by measure: of thirty programs with an ensure, a rescue, an
+---
+> what it did, by measure: of thirty-two programs with an ensure, a rescue, an
+204,206c208,210
+< nothing is raised through, twenty-eight have such a class, and of those none
+< costs more with gcc, and with clang twenty-six cost the same and two cost
+< more, each at a rescue arm typed to such a class that is never taken, 2
+---
+> nothing is raised through, thirty have such a class, and of those none costs
+> more with gcc, and with clang twenty-eight cost the same and two cost more,
+> each at a rescue arm typed to such a class that is never taken: 2
+208,212c212,217
+< class and an ensure, and 1 (76 to 77) for a rescue typed to the parent of
+< such a class: the arm's builder takes one more argument, the class's scan,
+< and asks the table first where a class built by name descends from the
+< arm's. Compiling a program that only defines such classes runs 16,300 to
+< 19,300 more instructions for each of them (callgrind of `spinel -c`, spinel
+---
+> class and an ensure, where the arm's builder takes one more argument, the
+> class's scan, and 1 (76 to 77) for a rescue typed to the parent of such a
+> class, both of Integer attributes alone, where the arm holds its compare and
+> clang takes the address of `sp_exc_msg` inside the loop and no longer ahead
+> of it. Compiling a program that only defines such classes runs 16,500 to
+> 19,600 more instructions for each of them (callgrind of `spinel -c`, spinel
+255,258d259
+< Nor `cause: nil` on a raise under a rescue that leaves through a method's
+< ensure: `e.cause` is the exception that was in flight, where CRuby gives
+< nil, for such a class as for a builtin exception on master.
+< 
+265a267,269
+> This change adds no refusal and lifts none, in the default build or under
+> any flag.
+> 
+283c287
+< - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+---
+> - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (compared with CRuby 3.3.6)
