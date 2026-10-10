@@ -7231,6 +7231,20 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
   else if (pt == TY_STRING && emit_when_string_range(c, cond, t, b)) {
     /* emitted the lexicographic cover check */
   }
+  /* a boxed subject against a String Range is covered when it holds a
+     String, as the Range's own === answers a boxed argument
+     (srange_eqq_covers_boxed). Left to the equality below, it matched no
+     String, the plain one or the handle's. Any other subject keeps that
+     equality, and one test on the tag sends it there. */
+  else if (pt == TY_POLY && comp_ntype(c, cond) == TY_STR_RANGE && srange_eqq_covers_boxed(c, cond)) {
+    int tr = ++g_tmp;
+    buf_printf(b, "({ sp_StrRange _t%d = ", tr); emit_expr(c, cond, b);
+    buf_printf(b, "; ((1u << _t%d.tag) & (1u << SP_TAG_STR | 1u << SP_TAG_OBJ)) && (_t%d.tag == SP_TAG_STR || _t%d.cls_id == SP_BUILTIN_STRBUF)"
+                  " ? (_t%d.tag == SP_TAG_STR ? sp_srange_cover_bytes(_t%d.first, _t%d.last, _t%d.excl, _t%d.v.s)"
+                  " : sp_srange_cover_handle(_t%d.first, _t%d.last, _t%d.excl, _t%d.v.p))"
+                  " : sp_poly_eq(_t%d, sp_box_srange(_t%d)); })",
+               t, t, t, t, tr, tr, tr, t, tr, tr, tr, t, t, tr);
+  }
   /* a numeric Range never covers an Array or a Hash (nor a String):
      evaluate the arm for its effects and answer false */
   else if ((comp_ntype(c, cond) == TY_RANGE && (ty_is_array(pt) || ty_is_hash(pt))) ||
