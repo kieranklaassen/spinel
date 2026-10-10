@@ -17054,6 +17054,62 @@ static sp_PolyArray *sp_Enumerator_to_a_yielded(sp_Enumerator *e, sp_bool as_arg
   }
   return items;
 }
+/* sp_Enumerator_to_a_yielded(e, 0) for a uniq whose block, or an == of the
+   program's own, may reach the Enumerator's items again while the steps
+   run: the first value of each item, as a lone `|x|` binds it, and in
+   `*kept` what else a survivor is made of, taken here, ahead of the first
+   step. That is the values after the first, one item's after another's,
+   behind an Array of Integers that says where each item's begin and where
+   the last one's end. `*kept` is left as it is for an Enumerator whose
+   steps pack nothing. */
+static sp_PolyArray *sp_Enumerator_to_a_firsts(sp_Enumerator *e, sp_PolyArray **kept) SP_UNUSED;
+static sp_PolyArray *sp_Enumerator_to_a_firsts(sp_Enumerator *e, sp_PolyArray **kept) {
+  int pair = e ? e->yields_pair : 0;
+  sp_PolyArray *items = sp_Enumerator_to_a(e);
+  if (!pair) return items;
+  SP_GC_ROOT(items);
+  sp_PolyArray *rest = sp_PolyArray_new();
+  SP_GC_ROOT(rest);
+  sp_IntArray *at = sp_IntArray_new();
+  SP_GC_ROOT(at);
+  sp_PolyArray_push(rest, sp_box_int_array(at));
+  for (sp_int k = 0; k < items->len; k++) {
+    sp_RbVal v = items->data[k];
+    sp_IntArray_push(at, rest->len);
+    if (!sp_yielded_packed(pair, v)) continue;
+    sp_PolyArray *a = v.cls_id == SP_BUILTIN_POLY_ARRAY ? (sp_PolyArray *)v.v.p : NULL;
+    sp_int n = a ? a->len : sp_poly_is_empty_step(v) ? 0 : sp_poly_length(v);
+    if (a && n) {
+      for (sp_int q = 1; q < n; q++) sp_PolyArray_push(rest, a->data[q]);
+      v = a->data[0];
+    }
+    else {
+      for (sp_int q = 1; q < n; q++) sp_PolyArray_push(rest, sp_poly_arr_get(v, q));
+      v = sp_poly_arr_get(v, 0);   /* nil for an empty step */
+    }
+    sp_gc_wb((void *)items);
+    items->data[k] = v;
+  }
+  sp_IntArray_push(at, rest->len);
+  *kept = rest;
+  return items;
+}
+/* What that uniq answers for item `i` when it is a survivor: a new Array of
+   the values the item packed, `first` and what was kept behind it, or `x`,
+   the block's parameter, for an item that packed one value or none. */
+static SP_COLD SP_NOINLINE sp_RbVal sp_yielded_kept_item(sp_PolyArray *kept, sp_int i, sp_RbVal first, sp_RbVal x) SP_UNUSED;
+static SP_COLD SP_NOINLINE sp_RbVal sp_yielded_kept_item(sp_PolyArray *kept, sp_int i, sp_RbVal first, sp_RbVal x) {
+  sp_IntArray *at = (sp_IntArray *)kept->data[0].v.p;
+  sp_int from = sp_IntArray_get(at, i), to = sp_IntArray_get(at, i + 1);
+  if (from == to) return x;
+  SP_GC_ROOT(kept);
+  SP_GC_ROOT_RBVAL(first);
+  sp_PolyArray *r = sp_PolyArray_new();
+  SP_GC_ROOT(r);
+  sp_PolyArray_push(r, first);
+  for (sp_int q = from; q < to; q++) sp_PolyArray_push(r, kept->data[q]);
+  return sp_box_poly_array(r);
+}
 /* __enum_pairs(arr): an Enumerator over [element, memo] pairs, each step
    yielding the two values (a blockless each_with_object, builtins/). */
 static sp_Enumerator *sp_enum_pairs_new(sp_RbVal arr) SP_UNUSED;
