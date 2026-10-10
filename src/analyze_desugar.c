@@ -3575,6 +3575,9 @@ int desugar_paren_def_body(Compiler *c) {
   return changed;
 }
 
+/* Set once this pass has changed the node table: it settled a test of the
+   engine and dropped what the test rules out, which CRuby may run. */
+int g_engine_decided = 0;
 int desugar_engine_branches(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count;
@@ -3687,6 +3690,7 @@ int desugar_engine_branches(Compiler *c) {
     if (ck == NK_ModuleNode || ck == NK_ClassNode || ck == NK_SingletonClassNode)
       changed |= engine_splice_list(nt, nt_ref(nt, id, "body"));
   }
+  if (changed) g_engine_decided = 1;
   return changed;
 }
 

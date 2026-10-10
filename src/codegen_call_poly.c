@@ -10,6 +10,195 @@
 #include "codegen_call_arms.h"
 #include "repr.h"
 
+/* A splat asks its operand to_a, and a Range's to_a walks its each. The
+   splat arms of values_at below answer for the built-in ones, so they are
+   taken only in a program that cannot have given a class its own: one with
+   no def, Symbol or String of the name (to_a; each too for a Range; and
+   method_missing, respond_to_missing? and respond_to?, which a splat asks
+   where there is no to_a, and which an alias can give), and no
+   define_method, define_singleton_method or alias_method whose name is not
+   written out, or that is itself named by a Symbol or a String; and no
+   class_eval, module_eval or instance_eval given a text, nor one of them or
+   eval named by a Symbol or a String. That is read of the nodes as they
+   are now; the walk of the program as written, ahead of every desugar,
+   is asked for each name as well (an_prog_never_gives): it also knows a
+   name sent by value, a block passed by value, a text evaluated and a
+   binding, which give a method that no node shows. Nor are they taken
+   where any of these can stand in what the compiler does not see: a file
+   it did not read (g_require_unread), or an arm the analysis dropped
+   under a test it decided for this engine (g_engine_decided), which CRuby
+   runs. Nor in a program that reopens a builtin exception class
+   (any_exc_reopen): a scalar pushed as an index can be values_at's
+   RangeError or TypeError, and a `raise` the program writes runs the
+   `initialize` such a class gives where a raise by the runtime does not.
+   Answered once for each arm. */
+static int splat_asks_builtin_scan(Compiler *c, int range);
+static int splat_asks_builtin(Compiler *c, int range) {
+  static const Compiler *memo_c; static int memo[2];
+  if (memo_c != c) { memo_c = c; memo[0] = memo[1] = -1; }
+  if (memo[range] < 0) memo[range] = splat_asks_builtin_scan(c, range);
+  return memo[range];
+}
+/* class_eval, module_eval and instance_eval take a text and run it as a
+   body: what they define is in no node. */
+static int splat_names_eval_of_text(const char *nm) {
+  return sp_streq(nm, "class_eval") || sp_streq(nm, "module_eval") || sp_streq(nm, "instance_eval");
+}
+static int splat_asks_builtin_scan(Compiler *c, int range) {
+  static const NodeKind kinds[] = { NK_DefNode, NK_SymbolNode, NK_StringNode };
+  static const char *const fields[] = { "name", "value", "content" };
+  const NodeTable *nt = c->nt;
+  if (g_require_unread || g_engine_decided || any_exc_reopen(c)) return 0;
+  if (!an_prog_never_gives("to_a", 0) || (range && !an_prog_never_gives("each", 0)) ||
+      !an_prog_never_gives("method_missing", 0) || !an_prog_never_gives("respond_to_missing?", 0) ||
+      !an_prog_never_gives("respond_to?", 0)) return 0;
+  for (int j = 0; j < 3; j++)
+    for (int n = comp_kind_first(c, kinds[j]); n >= 0; n = comp_kind_next(c, n)) {
+      const char *nm = nt_str(nt, n, fields[j]);
+      if (!nm) continue;
+      if (sp_streq(nm, "to_a") || (range && sp_streq(nm, "each")) || sp_streq(nm, "method_missing") ||
+          sp_streq(nm, "respond_to_missing?") || sp_streq(nm, "respond_to?")) return 0;
+      if (j != 0 && (sp_streq(nm, "define_method") || sp_streq(nm, "define_singleton_method") ||
+                     sp_streq(nm, "alias_method") || sp_streq(nm, "eval") || splat_names_eval_of_text(nm))) return 0;
+    }
+  for (int k = comp_kind_first(c, NK_CallNode); k >= 0; k = comp_kind_next(c, k)) {
+    const char *kn = nt_str(nt, k, "name");
+    if (kn && splat_names_eval_of_text(kn) && nt_ref(nt, k, "arguments") >= 0) return 0;
+    if (!kn || (!sp_streq(kn, "define_method") && !sp_streq(kn, "define_singleton_method") &&
+                !sp_streq(kn, "alias_method"))) continue;
+    int a = nt_ref(nt, k, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int i = 0; i < ac || i == 0; i++) {
+      NodeKind ak = i < ac ? nt_kind(nt, av[i]) : NK_NilNode;
+      if (ak != NK_SymbolNode && ak != NK_StringNode) return 0;
+      if (!sp_streq(kn, "alias_method")) break;
+    }
+  }
+  return 1;
+}
+/* Is a node held in a temp (g_argov) at `id` or under it? */
+static int holds_a_temp_under(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == id) return 1;
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (holds_a_temp_under(nt, nt_ref_at(nt, id, i))) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (holds_a_temp_under(nt, ids[j])) return 1;
+  }
+  return 0;
+}
+/* The last argument that holds a temp at it or under it, -1 where none
+   does: one walk from the end for the whole call. */
+static int last_arg_holding_a_temp(const NodeTable *nt, int argc, const int *argv) {
+  for (int j = argc - 1; j >= 0; j--) if (holds_a_temp_under(nt, argv[j])) return j;
+  return -1;
+}
+/* Did an argument after the splat at argv[k] run before the splat's operand
+   is read? What is held in a temp ran ahead of the statement, so any of a
+   later argument did (`last_held` is the last such argument); the operand
+   `op` did too, in its place, where the whole of it is held. */
+static int later_arg_ran_ahead(int k, int op, const int *argv, int last_held) {
+  for (int i = 0; i < g_n_argov; i++)
+    if (g_argov_node[i] == op || g_argov_node[i] == argv[k]) return 0;
+  return last_held > k;
+}
+/* Can the receiver change what a splat's operand reads after the list of
+   indexes is built? It is evaluated inside the call, after the list, unless
+   it is held in a temp, which ran ahead of it. Only a receiver that reads
+   and no more (a global, or subtree_is_pure_read) is known to change
+   nothing. */
+static int recv_runs_after_list(Compiler *c, int recv) {
+  if (nt_kind(c->nt, recv) == NK_GlobalVariableReadNode || subtree_is_pure_read(c, recv)) return 0;
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == recv) return 0;
+  return 1;
+}
+/* How many held temps (g_argov) name a node at `id` or under it. */
+static int temps_held_under(const NodeTable *nt, int id) {
+  int held = 0;
+  if (id < 0) return 0;
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == id) held++;
+  for (int i = 0; i < nt_num_refs(nt, id); i++) held += temps_held_under(nt, nt_ref_at(nt, id, i));
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) held += temps_held_under(nt, ids[j]);
+  }
+  return held;
+}
+/* Is a splat's operand, read ahead of the statement whose prelude is open,
+   what CRuby reads at the call `id`: one written out (a literal scalar, a
+   Range of Integer literals), a local nothing in that statement can rebind
+   (read_unbound_in_stmt), or any operand of a call that is the first thing
+   the statement evaluates (down from it by the value of a write or of an
+   operator write, a call's receiver or, past one that only reads a variable
+   or is a literal, its first argument, a return's first value, and
+   parentheses) while nothing outside the call is held in a temp
+   (`held_outside`, which ran ahead of it), so that nothing of the
+   statement runs between the two? */
+static int splat_read_in_order(Compiler *c, int id, int op, int held_outside) {
+  const NodeTable *nt = c->nt;
+  const int *ids;
+  const void *pre = NULL;
+  int n = 0, st = -1;
+  for (;;) {
+    if (nt_kind(nt, op) == NK_ParenthesesNode) op = nt_ref(nt, op, "body");
+    else if (nt_kind(nt, op) == NK_StatementsNode && (ids = nt_arr(nt, op, "body", &n)) && n == 1) op = ids[0];
+    else break;
+  }
+  switch (nt_kind(nt, op)) {
+  case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode: case NK_TrueNode: case NK_FalseNode:
+    return 1;
+  case NK_RangeNode: {
+    int l = nt_ref(nt, op, "left"), r = nt_ref(nt, op, "right");
+    if ((l < 0 || nt_kind(nt, l) == NK_IntegerNode) && (r < 0 || nt_kind(nt, r) == NK_IntegerNode)) return 1;
+    break;
+  }
+  case NK_LocalVariableReadNode:
+    if (read_unbound_in_stmt(c, op)) return 1;
+    break;
+  default: break;
+  }
+  if (held_outside || !view_stmt_top(&st, &pre) || pre != (const void *)g_pre) return 0;
+  for (int at = st, hops = 0; at >= 0 && hops < 64; hops++) {
+    if (at == id) return 1;
+    switch (nt_kind(nt, at)) {
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
+    case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+    case NK_GlobalVariableOperatorWriteNode:
+      at = nt_ref(nt, at, "value");
+      break;
+    case NK_ParenthesesNode:
+      at = nt_ref(nt, at, "body");
+      break;
+    case NK_StatementsNode:
+      ids = nt_arr(nt, at, "body", &n);
+      at = ids && n > 0 ? ids[0] : -1;
+      break;
+    case NK_ReturnNode: case NK_CallNode: {
+      int first = nt_kind(nt, at) == NK_CallNode ? nt_ref(nt, at, "receiver") : -1;
+      switch (first < 0 ? NK_NONE : nt_kind(nt, first)) {   /* a receiver that runs nothing */
+      case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
+      case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode:
+        first = -1;
+        break;
+      default: break;
+      }
+      if (first < 0) {
+        int args = nt_ref(nt, at, "arguments");
+        ids = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+        first = ids && n > 0 ? ids[0] : -1;
+      }
+      at = first;
+      break;
+    }
+    default: return 0;
+    }
+  }
+  return 0;
+}
+
 /* builtin methods on a poly receiver the runtime answers by the value it holds: inject / reduce(:op), the Array reductions and slices, values_at, Fiber's resume / transfer / raise, Queue's enq / deq */
 int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* Array-reduction methods on a boxed array element of a poly array (e.g.
@@ -80,7 +269,7 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   if (recv >= 0 && rt == TY_POLY && argc >= 1 && nt_ref(nt, id, "block") < 0 &&
       sp_streq(name, "values_at")) {
     if (!poly_name_user_claimed(c, name, argc)) {
-      int ti9 = ++g_tmp;
+      int ti9 = ++g_tmp, held9 = -1, heldn9 = -1, out9 = 0;
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", ti9, ti9);
       for (int k = 0; k < argc; k++) {
@@ -89,6 +278,40 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
            one alone (#4164) */
         if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) {
           int sx9 = nt_ref(nt, argv[k], "expression");
+          TyKind st9 = sx9 >= 0 ? comp_ntype(c, sx9) : TY_POLY;
+          /* a splatted Range gives its members and a splatted scalar is the
+             index itself, unless it is nil when the call runs: read as an
+             Array below, either was empty and the call answered from its
+             other indexes alone. Where a later argument ran before this
+             operand is read, the receiver runs after it, or more of the
+             statement can run between this read and the call, what the
+             operand holds then is not what CRuby splats: such a splat is
+             read as it was */
+          int arm9 = st9 == TY_RANGE ? 1 : splat_operand_is_scalar(st9) && st9 != TY_NIL ? 0 : -1;
+          if (arm9 >= 0 && splat_asks_builtin(c, arm9)) {
+            if (heldn9 != g_n_argov) {
+              held9 = last_arg_holding_a_temp(nt, argc, argv); heldn9 = g_n_argov;
+              out9 = g_n_argov ? g_n_argov - temps_held_under(nt, id) : 0;
+            }
+            if (later_arg_ran_ahead(k, sx9, argv, held9) || recv_runs_after_list(c, recv) ||
+                !splat_read_in_order(c, id, sx9, out9)) arm9 = -1;
+          }
+          else arm9 = -1;
+          if (arm9 == 1) {
+            Buf rb9; memset(&rb9, 0, sizeof rb9); emit_expr(c, sx9, &rb9);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_poly_values_at_range(_t%d, %s);\n", ti9, rb9.p ? rb9.p : "");
+            free(rb9.p);
+            continue;
+          }
+          if (arm9 == 0) {
+            Buf vb9; memset(&vb9, 0, sizeof vb9);
+            emit_boxed(c, sx9, &vb9);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_poly_values_at_scalar(_t%d, %s);\n", ti9, vb9.p ? vb9.p : "sp_box_nil()");
+            free(vb9.p);
+            continue;
+          }
           int ts9 = ++g_tmp, tj9 = ++g_tmp;
           /* the list first: what it hoists belongs ahead of the line that
              reads it, not inside that line's call */
