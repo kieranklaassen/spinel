@@ -1,0 +1,74 @@
+A splatted Range in a boxed values_at answers its elements
+
+    a = [[10, 20, 30], nil][ARGV.size]
+    p a.values_at(*(0..1))   # []; CRuby: [10, 20]
+
+values_at on a boxed receiver reads a splatted list with
+sp_poly_to_poly_array, which copies an Array and so answers none for
+what is no Array. A Range gave none of its members and an Integer was
+dropped, and the call answered from the other indexes alone. An
+operand typed as an Integer Range now has its members walked onto the
+list of indexes where it has both its ends (sp_poly_values_at_range,
+with no array between); without one it gives none, as before. One
+typed as a scalar is pushed as the index it is unless it is nil when
+the call runs (sp_poly_values_at_scalar): a slot typed Integer, Float
+or String can hold nil, and nil splats to none. An operand that is an
+Array, nil or a box is read as before, in the same C.
+
+A splat asks its operand to_a, and a Range's to_a walks its each. Both
+arms answer for the built-in ones, so neither is taken in a program that
+may have given a class its own: one with a def, a Symbol or a String
+named to_a (each too, for the Range arm), method_missing,
+respond_to_missing? or respond_to?, which an alias can give as well as a
+def; a define_method, define_singleton_method or alias_method whose name
+is not written out, or one of the three named by a Symbol or a String; a
+class_eval, module_eval or instance_eval given a text, or one of them or
+eval named by a Symbol or a String; or a file the compiler did not read
+(g_require_unread), or an arm the analysis dropped under a test it
+decided for this engine (`if RUBY_ENGINE == "ruby"`), which CRuby runs:
+desugar_engine_branches says so in g_engine_decided, set where it has
+changed the node table. Each name is asked of the walk of the program as
+written as well (an_prog_never_gives): it read the text ahead of every
+desugar, and it knows a name sent by value, a block passed by value, a
+text evaluated and a binding, which give a method that no node shows.
+Nor is either taken in a program that reopens a builtin exception class
+(any_exc_reopen): a scalar pushed as an index can be values_at's
+RangeError or TypeError, CRuby runs an `initialize` such a class gives
+for it, and a rescue can print what the call printed; a `raise` the
+program writes runs it, a raise by the runtime does not.
+
+The list of indexes is built ahead of the statement that holds the
+call, so a splat's operand is read there, and an arm is taken only where
+that is what CRuby reads at the call (splat_read_in_order). What the
+statement runs before the call comes after that read: an interpolation,
+an earlier value of a multiple assignment, the index or the receiver of
+a store, the left side of an operator, an earlier value of a return. So
+the operand is one nothing there can change: one written out, a literal
+scalar or a Range of Integer literals; a local that nothing in the
+statement can rebind (read_unbound_in_stmt); or any operand of a call
+that is the first thing its statement runs (the value of a write or of
+an operator write, a receiver or, past one that only reads a variable
+or is a literal, a first argument, a return's first value), with
+nothing outside the call held in a temp ahead of it. Every other splat
+is read as before, `puts "#{j = nil}#{a.values_at(*j)}"` among them.
+
+A later argument held in a temp runs before an earlier splat's operand
+is read. Where one did and the operand is not held in its place too,
+the splat is read as before: what that argument left in the operand
+is not what CRuby splats. The receiver is evaluated after the list of
+indexes is built, so where it is more than a read and is not held in a
+temp, `(j = nil; a).values_at(*j)`, the splat is read as before too.
+
+Tests: test/boxed_values_at_splat.rb, test/boxed_values_at_splat_min.rb,
+test/boxed_values_at_splat_own_to_a.rb,
+test/boxed_values_at_splat_own_each.rb,
+test/boxed_values_at_splat_named_to_a.rb,
+test/boxed_values_at_splat_method_missing.rb,
+test/boxed_values_at_splat_alias_method_missing.rb,
+test/boxed_values_at_splat_receiver_effect.rb,
+test/boxed_values_at_splat_eval_text.rb,
+test/boxed_values_at_splat_engine_arm.rb,
+test/boxed_values_at_splat_reopened_error.rb,
+test/boxed_values_at_splat_earlier_part.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
