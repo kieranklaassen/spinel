@@ -1,0 +1,51 @@
+--- body v7
++++ body v11
+@@ -21,9 +21,22 @@
+ - the `===` call. The arm for a receiver that compares by value leaves out an Integer Range and a Float Range by their families 5 and 6 of `eq_family`, and not the String Range's 7. It leaves 7 out too, and `emit_range_call` answers: a String is covered by its bytes and length, the plain one and the appended one (a shared handle) alike.
+ - `when`. `emit_when_typed_test` had an arm for a String subject against a String Range, and for a boxed subject against an Integer or a Float Range, and none for a boxed subject against a String Range. It gains one: a plain String is compared where the arm is written, a boxed object is asked out of line (`sp_srange_when_obj`).
+ 
+-What does not change: a value that holds no String is not covered, and that includes an object with a `<=>` of its own, which CRuby asks and `===` here does not, before or after; an object of one of the program's classes as the subject of `when` is still asked whether it equals the Range; a program with a `Range#===` of its own, or its own `String#<=>`, `#==` or `#succ`, keeps master's C, and so does one whose box may hold a plain String under the handle's tag (the piece beneath says which). One answer changes beside the String's: a boxed String Range equal to the Range was `true` and took the arm, and is `false`, as in CRuby.
++What does not change: a value that holds no String is not covered, and that includes an object with a `<=>` of its own, which CRuby asks and `===` here does not, before or after; an object of one of the program's classes as the subject of `when` is still asked whether it equals the Range; a program that has, or may have, a `===`, a `<=>`, an `==` or a `succ` of its own, in any class, keeps master's C, and so does one where the piece beneath does not say what a box tagged as a handle holds (it stores the String of a method call its scan does not follow). "May have" is the answer of the piece beneath: a `def` in the builtin's class, a `def` or a Symbol of the name anywhere in the program, or a site where a method is named, made, mixed in or loaded by something the text does not spell. One answer changes beside the String's: a boxed String Range equal to the Range was `true` and took the arm, and is `false`, as in CRuby.
+ 
+-Cost on a program master answered right: up to four instructions a turn either way with gcc, by the layout, in the shape of the last two rows; none with clang, none elsewhere. In instructions a turn against the commit beneath, gcc 13.3 / clang 18.1, callgrind over 300,000 turns of `n += 1 if r === x`, and of a `case x` with the one arm `when "aa".."az"`, `x` read once from `["ab", 1]` (the Integer) or `["zz", 1]` (the String):
++A program that can have an `each` of its own keeps master's C as well. `grep` and `grep_v` ask this `===` of each element, and over an Array they walk as the builtin does, where CRuby walks by the `each` the program gave it:
++
++```ruby
++class Array
++  def each
++    self
++  end
++end
++p ["c", 5, "q", nil].grep("a".."m")
++```
++
++prints `[]` in CRuby and on master, which finds no String for another reason, and would print `["c"]` with the arm. "Can have" is a `def each` anywhere in the program, the Symbol `:each`, or such a site (`an_prog_never_gives`, the walk the piece beneath asks). A program that requires a package is left as master has it too, each of the nine tried: set, csv, uri, bigdecimal and pathname by their own Ruby, which the walk reads as the program's text, and stringio, json, strscan and `Gem::Version` because the compiler does not prove it read every file. There `===` and `when` of a String Range answer a boxed String as on master.
++
++Cost on a program master answered right: up to four instructions a turn either way with gcc, by the layout, in the shape of the last two rows, and two with clang where the `case` runs in a block (`300000.times`); none elsewhere. In instructions a turn against the commit beneath, gcc 13.3 / clang 18.1, callgrind over 300,000 turns of `n += 1 if r === x`, and of a `case x` with the one arm `when "aa".."az"`, `x` read once from `["ab", 1]` (the Integer) or `["zz", 1]` (the String):
+ 
+ | x | `===` | `when` |
+ |---|---|---|
+@@ -32,9 +45,9 @@
+ | an Integer that takes a `when 1` ahead of the arm, two cases a turn | | +1 / 0 |
+ | the same in a program that holds an appended String | | +1 / 0 |
+ 
+-The Range is made only when the arm is reached, and it is not boxed. The arm adds nothing to the path of a `when` taken ahead of it; the last two rows are gcc keeping the subject in other registers there, and with the Range in a local (`when r`) the same turn measures +4 / 0. No corpus program's C changes beyond the tests. optcarrot's C is unchanged.
++The Range is made only when the arm is reached, and it is not boxed. The arm adds nothing to the path of a `when` taken ahead of it; the last two rows are gcc keeping the subject in other registers there, and with the Range in a local (`when r`) the same turn measures +4 / 0. No corpus program's C changes beyond the two tests, with `--share-strings` or without. optcarrot's C is unchanged.
+ 
+-Not here: `K === x` for a constant `K` that holds a String Range answers false (the call is read as a class test); `all?`, `any?` and `none?` of a String Array with a String Range answer as if no element matched; `in "a".."m"` is not touched.
++Not here: a program with an `each` of its own anywhere, one that mixes in a module (its own too) and one that requires a package are left as master has it (`false`, `other`, `[]` above); `K === x` for a constant `K` that holds a String Range answers false (the call is read as a class test); `all?`, `any?` and `none?` of a String Array with a String Range answer as if no element matched; `in "a".."m"` is not touched.
+ 
+ ## `make gate` (on this branch merged with current master)
+ 
+@@ -42,9 +55,9 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On these two commits over master `74fa6d7c2457` with the two pull requests they depend on beneath them: the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check` for each commit. On the same two over master `fb0de073421a`: the same, `make share-strings-test` and `make cident` against their parent.
++Run here before that, on these two commits over master `da597297426d` with the pull request they depend on beneath them (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check` for each commit, `make gc-stress-test`, `make share-strings-test`, `make int-min-test`, `make share-verify-test`, `make cident` against the commit beneath, and the figures above.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
+ - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+-- [x] Depends on: "A String Range's cover? and include? read a boxed appended String" (its answer for the program, whether a box tagged as a handle holds one, and its out-of-line read of the handle are used here), and through it "A String Range made on the spot keeps its ends, made in order, until it is read"
++- [x] Depends on: "A String Range's cover? and include? read a boxed appended String" (its answer for the program, whether a box tagged as a handle holds one, its question whether the membership is the builtin's and its out-of-line read of the handle are used here)

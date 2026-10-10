@@ -1,0 +1,33 @@
+--- message 2 v2
++++ message 2 v6
+@@ -28,19 +28,21 @@
+ in CRuby.
+ 
+ Master's C stays where `===` of the Range keeps it (the commit before):
+-a Range#=== of the program's own, its own String#<=>, #== or #succ, a
+-box that may hold a plain String under the handle's tag.
++a program that has or may have a ===, a <=>, an ==, a succ or an `each`
++of its own, in any class, and one where it is not said what a box
++tagged as a handle holds.
+ 
+ Cost (callgrind, 300,000 turns, gcc 13.3 and clang 18.1). The Range is
+ made only when the arm is reached, and it is not boxed. Reached by an
+-Integer, a case runs 228 and 206 instructions fewer; by a String
+-outside the Range, 51 and 49 fewer. An arm that is not reached, behind
+-a `when 1` the subject takes: a turn of two such cases runs 4
+-instructions fewer with gcc in a program that holds no handle and 1
+-more in one that does, and the same with clang. The arm adds nothing to
+-that path; gcc keeps the subject in other registers ahead of it.
++Integer, a case runs 228 and 207 instructions fewer; by a String
++outside the Range, 51 and 50 fewer. An arm that is not reached, behind
++a `when 1` the subject takes: a turn of two such cases runs 1
++instruction more with gcc and none more with clang, with a handle in
++the program or without (2 more with clang where the case runs in a
++block). The arm adds nothing to that path; the C compiler keeps the
++subject in other registers ahead of it.
+ 
+ Test: test/case_when_str_range_boxed.rb (expected from CRuby 3.3.6),
+-added to GC_STRESS_TESTS.
++run under GC stress by its header line.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
