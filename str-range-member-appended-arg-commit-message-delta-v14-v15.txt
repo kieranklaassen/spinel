@@ -1,0 +1,65 @@
+--- message v14, on the handoff
++++ message v15
+@@ -58,9 +58,10 @@
+ to_int, which a def in String or anywhere above it, an alias, a made
+ method or a method_missing can answer; an end that answers an Integer
+ makes the call cover? by the compare. Otherwise CRuby walks: nothing
+-more for two one-character ends, == for two all-digit ends that fit a
+-machine word, Integer#<= (#< for a Range without its end), Integer#succ
+-and == for all-digit ends past one, String#succ and == for any other.
++more for two one-character ASCII ends, == for two all-digit ends that
++fit a machine word, Integer#<= (#< for a Range without its end),
++Integer#succ and == for all-digit ends past one, String#succ and == for
++any other.
+ Ten names with the three calls' own; === is not asked here. The
+ runtime's walk asks none of them, so include? and member? keep master's
+ C where the program may give any class a to_int, a method_missing, a <=
+@@ -68,17 +69,17 @@
+ 
+ Cost: none where the C stays. In a program that holds a handle, a
+ membership call with a boxed argument runs more instructions (callgrind,
+-300,000 turns of `n += 1 if r.cover?(x)`, gcc 13.3 and clang 18.1). In
+-a while loop: 4 and 2 a call for a plain String held in a local, 6 and
+-2 for one read from an Array each turn, 6 and 4 for an Integer, 3 and 1
+-for include? of a plain String. In a block: 5 and 2, 8 and 2, 6 and 4,
+-4 and 1. Compiling such a call runs 31,400 to 33,100 more instructions
+-(callgrind over `spinel -c`: 2.4% over 1,000 of them, 2.6% over 2,000):
++300,000 turns of `n += 1 if r.cover?(x)`, gcc 13.3 and clang 18.1). In a
++while loop: 4 and 2 a call for a plain String held in a local, 6 and 2
++for one read from an Array each turn, 6 and 4 for an Integer, 4 and 1
++for include? of a plain String. In a block: 5 and 2, 8 and 2, 6 and 4, 5
++and 1. Compiling such a call runs 31,400 to 32,700 more instructions
++(callgrind over `spinel -c`: 2.4% over 1,000 of them, 2.5% over 2,000):
+ the arm, and in it 1,170 a call for the questions, eight for cover? and
+ twelve for include? and member?, each a lookup in a table the analysis
+ built. A program with no such call does not ask. The walk for handles
+ looks at the call nodes stored as a handle: compiling optcarrot runs
+-8,288,520,908 instructions for 8,288,261,919, and its C is byte for byte
++8,276,624,233 instructions for 8,276,365,216, and its C is byte for byte
+ the same.
+ 
+ Not here. A String stored from a method call the scan does not follow
+@@ -97,8 +98,21 @@
+ method_missing that calls super or sits in a class of its own, a
+ respond_to_missing? or a respond_to? that names to_int. The walk does
+ not ask where a def lands or what it answers, and these seven are the
+-price of that. `===` and case/when of a String Range with a boxed value
+-are their own change.
++price of that. A String master holds otherwise than CRuby by a limit it
++documents is compared as master holds it, for the handle now as for a
++plain String on master: the default build answers by the Range's copies
++of its ends where the program changes in place the String an end was
++made from (docs/limitations.md, "A String Range keeps copies of its
++endpoints"); under --share-strings master keeps those Strings and the
++handle is compared with them as they are, as CRuby does; and a String
++transcoded out of UTF-8 is compared by the UTF-8 bytes master keeps for
++it. A method the program gave a builtin class and master answers by the
++builtin (its own select, map, find or each of Array, its own << of
++String) is still answered by the builtin, so a cover? of a Range it
++would not have made, with a String it would not have built, or in a
++block it would not have run is now true where it was false; that method
++is not changed here. `===` and case/when of a String Range with a boxed
++value are their own change.
+ 
+ Test: test/str_range_member_boxed_handle.rb (expected from CRuby
+ 3.3.6), run under GC stress by its header line: its last block makes

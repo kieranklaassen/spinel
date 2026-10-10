@@ -1,0 +1,54 @@
+<!-- See CONTRIBUTING.md. A pull request needs no issue. If its gate fails here on a mechanical point, or it conflicts, we fix it and say so; a failure that needs a design decision goes back to its author. -->
+
+## What this changes
+
+Fix with a cost in a program that holds an appended String: 1 to 8 instructions on a membership call of a String Range with a boxed argument (the table below). A program that holds none compiles to the same C, with `--share-strings` and without.
+
+```ruby
+h = {"k" => "a".dup, "n" => 1}
+h["k"] << "b"
+r = ("aa".."az")
+p r.cover?(h["k"])
+p r.include?(h["k"])
+p r.member?(h["k"])
+```
+
+prints `false` three times (`spinel diff`: output-diff), with and without `--share-strings`. CRuby prints `true` three times.
+
+A String something appends to is held as its shared handle, and a boxed read of it carries the handle (`SP_BUILTIN_STRBUF`), not a plain boxed String. `emit_range_call` wrote the membership of a typed String Range with a boxed argument as `_a.tag == SP_TAG_STR && sp_srange_cover(...)`, so the handle was no member. A Hash with one element the program appends to holds every String it was built with as a handle: with `"p" => "ab"` beside `"k"`, `r.cover?(h["p"])` was false too.
+
+The handle is now asked after the plain String: `include?` walks to its text, `cover?` compares it by its bytes, out of line. A nil stored among handles is a box with no handle and is no member.
+
+The arm is written only where a box tagged as a handle is known to hold one. `program_strbuf_boxes` answers that once for the program, before any C is written. Master's C stays, byte for byte, in a program that holds no handle, built with `--share-strings` or without; in one that stores, where a handle is wanted, the String of a method call on an object of the program's that is no read of a handle's slot through a receiver (the scan does not follow what such a call renders, so it does not say what that box holds); and in a program that has, or may have, a method of the call's name or a `<=>`, an `==` or a `succ` of its own, in any class: this call does not ask them, before or after. `include?` and `member?` stand aside for four names more, a `to_int`, a `method_missing`, a `<=` or a `<` (below).
+
+"May have" is asked of two tables. A `def` in the builtin's class is in the class table. The rest is `an_prog_never_gives`, the analysis's walk of the program as written (src/analyze.c). It reads the program ahead of every rewrite and of the arm a test of the engine drops: no `def` and no Symbol of the name anywhere, and no site where a method is named, made, mixed in or loaded by something the text does not spell. So `alias <=> index`, `def lo.<=>`, a `String.define_method(:<=>) { }` under a `rescue`, a `send(name)`, an `eval` and a file the compiler did not read leave master's C. So does `class String; prepend Kernel; end`: Kernel's `<=>` answers nil for two Strings that differ, and no text of the program's holds it.
+
+The names asked are the ones CRuby asks, call by call. `cover?` asks its own and `<=>` of the ends; `===` is not asked here. `include?` and `member?` ask their own, then each end for `to_int`, which a `def` in String or anywhere above it, an `alias`, a made method or a `method_missing` can answer; an end that answers an Integer makes the call `cover?` by the compare. Otherwise CRuby walks: nothing more for two one-character ASCII ends, `==` for two all-digit ends that fit a machine word, `Integer#<=` (`#<` for a Range without its end), `Integer#succ` and `==` for all-digit ends past one, `String#succ` and `==` for any other. That is ten names with the three calls' own: `<=>`, `==`, `succ`, `to_int`, `method_missing`, `<=` and `<`; `eql?` is not one. The runtime's walk asks none of them, so `include?` and `member?` keep master's C where the program may give any class a `to_int`, a `method_missing`, a `<=` or a `<`; `cover?` does not ask those four and takes the arm there. The walk does not ask where a `def` lands, so a `def ==` in a class of the program's own leaves master's C too, and so does the Symbol `:==` written anywhere: the three calls answer `false` there, as on master. Of the 6,892 programs of test/, benchmark/ and the packages' tests the two tables answer "may" for 1,242 on `cover?`, 1,283 on `include?` and 1,278 on `member?`, for 1,155 of them by a site. A package is the program's text to the walk: each of the nine tried (set, csv, uri, bigdecimal, pathname, stringio, json, strscan and Gem::Version) leaves master's C.
+
+Cost in instructions a call, gcc 13.3 / clang 18.1, callgrind over 300,000 turns of `n += 1 if r.cover?(x)`, in a `while` loop and in a `300000.times` block, with `r = ("aa".."az")` and `x` read once from `["ab", 1]`. "With a handle" puts `hh = {"k" => "x".dup, "n" => 1}; hh["k"] << "y"` above the loop.
+
+| boxed argument | no handle in the program | with a handle, `while` | with a handle, block |
+|---|---|---|---|
+| `cover?`, a String in a local | 0 / 0 | +4 / +2 | +5 / +2 |
+| `cover?`, a String read from the Array each turn | 0 / 0 | +6 / +2 | +8 / +2 |
+| `cover?`, an Integer | 0 / 0 | +6 / +4 | +6 / +4 |
+| `include?`, a String (`"aa".."ad"`) | 0 / 0 | +4 / +1 | +5 / +1 |
+
+Compiling such a call runs 31,400 to 32,700 more instructions, 2.4% over 1,000 of them, 2.5% over 2,000 (callgrind over `spinel -c --no-line-map`, the compiler alone, against master, on the example's first three lines followed by 1,000 and by 2,000 lines `x = r.cover?(h["k"])`, `x = r.include?(h["k"])`, `x = r.member?(h["k"])` in turn: 1,322,604,835 for 1,291,253,935 and 2,647,069,841 for 2,581,727,187): the arm, and in it 1,170 a call for the questions, eight for `cover?` and twelve for `include?` and `member?`, each a lookup in a table the analysis built. A program without such a call does not ask: compiling optcarrot runs 8,276,624,233 instructions for 8,276,365,216, the walk for handles, and its C is the same.
+
+`make cident` against master: the C of 6891 programs is identical and of 1 differs, test/str_range_member_boxed_handle.rb. With `--share-strings` 6890 are identical, the same 1 differs, and both builds refuse 1, test/string_plain_mutator_result_kept.rb (named in test/share/known-failures.txt).
+
+Not here: a program that has or may have a method named `cover?`, `include?`, `member?`, `<=>`, `==` or `succ` of its own, in any class and by any road, is left as master has it, and that takes in a program that mixes in a module, its own too, and one that requires a package: of the nine tried, set, csv, uri, bigdecimal and pathname by their own Ruby, which the walk reads as the program's text, and stringio, json, strscan and `Gem::Version` because the compiler does not prove it read every file; `include?` and `member?` of a program with a `def` or a Symbol of `to_int`, `method_missing`, `<=` or `<` anywhere still answer `false` for the handle, also where CRuby would not ask that method or would get no Integer from it (a `to_int` in a class of the program's own, one that answers nil, a Float or a String, an `attr_accessor :to_int`, a `method_missing` that calls `super` or sits in a class of its own, a `respond_to_missing?` or a `respond_to?` that names `to_int`), since the walk does not ask where a `def` lands or what it answers, and these seven are the price of that; a String stored from a method call the scan does not follow (`{"k" => box.text}` beside an appended String, without `--share-strings`) still answers `false`, since that program keeps master's C, and so does one stored from a reader called without a receiver (`{"k" => name}` in a method of its class, with `--share-strings`); `cover?` of a plain String still compares up to its first NUL; a String Range the call does not see as typed (read out of an Array or a Hash, or a "Range or nil" local called with `&.`) and `r.method(:cover?).call(x)` still answer false for the handle; a String that master holds otherwise than CRuby by a limit it documents is compared as master holds it, for the handle now as for a plain String argument on master, also where master's `false` for the handle happened to be CRuby's answer: in the default build a program that changes in place the String an end was made from, after the Range is made (`first << "x"`, a `!` method, `replace`), is answered by the Range's copies of its two ends, also where CRuby's answer is `true` (docs/limitations.md, "A String Range keeps copies of its endpoints"); under `--share-strings` master keeps the Strings the ends were made from (its commit "--share-strings: a String Range keeps the Strings its endpoints were made from") and the handle is compared with them as they are, as CRuby does; and a String the program transcoded out of UTF-8 (`"\u00E9".encode("ISO-8859-1")`, `"b".encode("UTF-16LE")`) is compared by the UTF-8 bytes master keeps for it (docs/limitations.md, "Mixed / non-UTF-8 encodings"); neither limit is changed here; a method the program gave a builtin class and master answers by the builtin (its own `select`, `map`, `find` or `each` of Array, its own `<<` of String) is still answered by the builtin, so a `cover?` of a Range it would not have made, with a String it would not have built, or in a block it would not have run is now true where it was false: that method is not changed here; `===` and `case`/`when` of a String Range with a boxed value are their own change.
+
+## `make gate` (on this branch merged with current master)
+
+```
+gate: run on the Mac at opening
+```
+
+Run here before that, on this commit over master `40b81c3585b7` (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the twenty-nine tests at five collector settings with both compilers, with and without `--share-strings`, and under `--int-overflow=wrap` and `--int-overflow=promote`, `ruby tools/gate.rb check-range HEAD^1 HEAD`, `make gc-stress-test`, `make share-strings-test`, `make int-min-test`, `make cident` against master, and the figures above, call counts and compile counts alike. `make share-verify-test` ends as it does on master without this commit: one failure (test/share/share_strings_net_http_zlib.rb) and two new diagnostics (test/share/share_strings_exception_dispatch.rb).
+
+- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+- [x] Values past 2^31 are marked `# spinel: int64` (none: no Integer of a test passes it; three of the tests hold longer digit runs as the text of Strings, which `tools/gate.rb check` notes and does not fail; the tests were not run with a 32-bit Integer here)
+- [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+- [x] Depends on: nothing (pull requests 8114 and 8168, which it stood on, are merged)
