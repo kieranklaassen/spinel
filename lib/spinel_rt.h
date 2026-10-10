@@ -11116,6 +11116,54 @@ static sp_RbVal sp_poly_dig_list(sp_RbVal recv, sp_PolyArray *keys) {
   return cur;
 }
 /* poly[poly_key]: dispatch on key tag at runtime. */
+/* The sign of an index that converts to an Integer past a word, 0 for any
+   other: a Rational of Bignums, or a Complex with no imaginary part whose
+   real part is that far. The conversion to a word cannot hold it. */
+static int sp_poly_int_idx_far(sp_RbVal idx) {
+  if (idx.tag != SP_TAG_OBJ || !idx.v.p) return 0;
+  if (idx.cls_id == SP_BUILTIN_COMPLEX) {
+    sp_Complex *c = (sp_Complex *)idx.v.p;
+    if (c->im != 0.0 || (c->fl & SP_CPLX_IM_F) || !isfinite(c->re)) return 0;
+    return c->re >= -(sp_float)INTPTR_MIN ? 1 : c->re < (sp_float)INTPTR_MIN ? -1 : 0;
+  }
+  if (sp_poly_is_brat(idx)) {
+    sp_Bigint *t = sp_brat_trunc_b((sp_BigRational *)idx.v.p);
+    return sp_bigint_fits_int(t) ? 0 : sp_bigint_sign(t);
+  }
+  return 0;
+}
+/* Integer#[] by one index that is no Integer and no Float, which
+   sp_poly_index_poly reads itself. A Rational or a Complex with no
+   imaginary part is the Integer it converts to. One past a word (a Bignum,
+   or a Rational or a Complex that large) is past every bit: the receiver's
+   sign above them, 0 below. A Bignum receiver takes a Bignum so, and no
+   other index that large: CRuby's RangeError. nil, true and false are the
+   conversion's TypeError. Those are the kinds answered here, and every
+   other is read as before, bit 0.
+   An Array, a Hash or a Proc is CRuby's TypeError too, but worded by a
+   to_s it asks the index's class; and the bridge that asks an object its
+   to_int leaves out a class held by value, so its refusal is not CRuby's
+   TypeError. All of it is here so that sp_poly_index_poly_conv asks the
+   receiver's tag and no more, and the receiver comes by address: passed by
+   value, gcc lays the Integer read above the call out three instructions
+   longer. */
+static SP_NOINLINE sp_RbVal sp_poly_int_bit_other(const sp_RbVal *rp, sp_RbVal idx) {
+  sp_RbVal recv = *rp;
+  int big = recv.tag == SP_TAG_BIGINT, far;
+  if (!(idx.tag == SP_TAG_BIGINT || idx.tag == SP_TAG_NIL || idx.tag == SP_TAG_BOOL ||
+        sp_poly_is_rational(idx) || sp_poly_is_brat(idx) ||
+        (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_COMPLEX)))
+    return sp_poly_arr_get_hash(recv, 0);
+  if (idx.tag == SP_TAG_BIGINT) far = sp_bigint_sign((sp_Bigint *)idx.v.p);
+  else {
+    /* past a word a converted index answers as a Bignum does, and a Bignum
+       receiver's conversion is CRuby's RangeError */
+    far = sp_poly_int_idx_far(idx);
+    if (!far) return sp_box_int(sp_poly_int_bit(recv, big ? sp_poly_arg_int_chk(idx) : sp_poly_arg_int_chk_w(idx, 1)));
+    if (big) sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+  }
+  return sp_box_int(far > 0 && sp_poly_negative_p(recv));
+}
 static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* a curried Proc applies its [] argument whatever the key kind -- claimed
      here, before the key-typed dispatch below coerces it to an index */
@@ -11267,6 +11315,169 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id) &&
       recv.cls_id != SP_BUILTIN_POLY_POLY_HASH)
     return sp_poly_hash_foreign_miss(recv, idx);
+  return sp_poly_arr_get_hash(recv, i);
+}
+/* The same read, line for line, where the emitter proved that it answers
+   the same whichever of its receiver and its index runs first
+   (index_order_unproved, codegen_call_recv.c), with one line more ahead of
+   the last: an Integer read by an index no arm takes answers as Integer#[]
+   does. Elsewhere bit 0 can be CRuby's bit of a value the index replaced,
+   and every other caller keeps sp_poly_index_poly. */
+static sp_RbVal sp_poly_index_poly_conv(sp_RbVal recv, sp_RbVal idx) {
+  /* a curried Proc applies its [] argument whatever the key kind -- claimed
+     here, before the key-typed dispatch below coerces it to an index */
+  if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_CURRY)
+    return sp_curry_call_poly((sp_Curry *)recv.v.p, 1, &idx);
+  /* a Proc's or a Method's [] is a call, and its argument of any kind (a
+     shared String handle, nil, an Integer) is the one argument: the
+     key-typed arms below would take it for an index (#6179). A Proc keeps
+     the argument in a parameter nothing roots, so it is held for the Proc. */
+  if (sp_poly_is_call_aref(recv))
+    return recv.cls_id == SP_BUILTIN_PROC ? sp_poly_call_aref_held(recv, idx)
+                                          : sp_poly_call_aref(recv, idx);
+  /* Reading through a shared-string handle is non-mutating, so it answers as
+     its live value: the String arms below all test SP_TAG_STR, and a handle
+     fell past every one of them to the trailing nil (#4279). */
+  if (sp_poly_is_strbuf(recv)) return sp_poly_index_poly_conv(sp_poly_strbuf_deref(recv), idx);
+  /* an Integer index into an array is the common read, and it matches nothing
+     below until the very last line (array kinds are builtin, so the Struct arm
+     with its cls_id >= 0 test cannot claim it) */
+  if (idx.tag == SP_TAG_INT && recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))
+    return sp_poly_arr_get_hash(recv, idx.v.i);
+  /* nil is no array index: CRuby's TypeError, not element 0 */
+  if (idx.tag == SP_TAG_NIL && recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))
+    sp_raise_cls("TypeError", "no implicit conversion from nil to integer");
+  /* ...nor a String's or a Symbol's: the index arms below read it as 0 */
+  if (idx.tag == SP_TAG_NIL && (recv.tag == SP_TAG_STR || recv.tag == SP_TAG_SYM))
+    sp_raise_cls("TypeError", "no implicit conversion from nil to integer");
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) && idx.tag != SP_TAG_BIGINT &&
+      !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE)) {
+    if (idx.tag == SP_TAG_FLT) sp_float_arg_check(idx.v.f);
+    if (idx.tag == SP_TAG_FLT) return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Integer", sp_poly_class_name(idx)));
+  }
+  /* heterogeneous-key hash: any key kind (incl. Method) looks up directly. */
+  if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_POLY_POLY_HASH)
+    return sp_PolyPolyHash_get((sp_PolyPolyHash *)recv.v.p, idx);
+  /* a user object's own [] (`r[k] ||= v` on a boxed r reads through here) */
+  if (SP_UNLIKELY(sp_poly_is_user_obj(recv))) {
+    sp_RbVal _u;
+    if (sp_poly_user_cmp("[]", recv, idx, &_u)) return _u;
+    /* ...and one that has none is CRuby's NoMethodError, which `r[k] ||= v`
+       raises before it stores: the reads below answered nil, and the store
+       ran. A Struct's or a Data's members are read below. */
+    if (!(sp_obj_to_h_fn && sp_obj_to_h_fn(recv).tag == SP_TAG_OBJ))
+      sp_raise_nomethod(sp_nomethod_msg("[]", recv));
+  }
+  /* A shared String key reads as its live value. The callable, object and
+     heterogeneous Hash arms above keep the original argument; the typed
+     String-keyed arms below need its bytes. */
+  if (SP_UNLIKELY(sp_poly_is_strbuf(idx))) idx = sp_poly_strbuf_deref(idx);
+  if (idx.tag == SP_TAG_STR) return sp_poly_get_str(recv, idx.v.s);
+  if (idx.tag == SP_TAG_SYM) return sp_poly_get_sym(recv, (sp_sym)idx.v.i);
+  /* a Range index on a poly STRING is a substring (String#[Range]); without
+     this a Range fell through as i=0 and returned char 0 (#3175). */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && recv.tag == SP_TAG_STR) {
+    sp_Range rgx = sp_range_ix(*(sp_Range *)idx.v.p), *rg = &rgx;
+    return sp_box_str(sp_str_sub_range_r(recv.v.s ? recv.v.s : sp_str_empty,
+                                         sp_range_first_from(*rg), rg->last, (int)rg->excl));
+  }
+  /* A Symbol answers a Range the way its NAME does, because Symbol#[] is
+     String#[] on #to_s: `:symbol[0..2]` is "sym". Only the String and the
+     array kinds took a Range here, so a symbol receiver fell past every arm
+     to the trailing nil -- the same lost value #4769 fixed for the
+     two-argument `:symbol[0, 3]`. Out of range is nil, exactly as it is for
+     the String the symbol names, which is what sp_box_str answers. */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && recv.tag == SP_TAG_SYM) {
+    sp_Range rgx = sp_range_ix(*(sp_Range *)idx.v.p), *rg = &rgx;
+    return sp_box_str(sp_str_sub_range_r(sp_sym_to_s((sp_sym)recv.v.i),
+                                         sp_range_first_from(*rg), rg->last, (int)rg->excl));
+  }
+  /* A Regexp index on a poly String or Symbol is its first match, or nil,
+     setting $~ as the typed s[/re/] does; it fell through as i=0 and
+     answered the first character, matched or not. */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_REGEX && idx.v.p &&
+      (recv.tag == SP_TAG_STR || recv.tag == SP_TAG_SYM)) {
+    const char *s = recv.tag == SP_TAG_SYM ? sp_sym_to_s((sp_sym)recv.v.i)
+                                           : (recv.v.s ? recv.v.s : sp_str_empty);
+    return sp_box_nullable_str(sp_re_match((mrb_regexp_pattern *)idx.v.p, s) >= 0 ? sp_re_match_str : NULL);
+  }
+  /* the same for a poly ARRAY: a sub-array, not element 0 (#3464) */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE &&
+      recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))
+    return sp_poly_arr_range(recv, *(sp_Range *)idx.v.p);
+  /* Integer#[range]: the bit field the range names. lo..hi is hi-lo+1 bits
+     from lo (an exclusive end one fewer), an endless range is everything
+     above lo, and a beginless one is CRuby's ArgumentError -- the field below
+     bit 0 has no end. The typed arms have answered this all along; a boxed
+     receiver matched nothing here and left by the trailing hash read, so
+     `b[..3]` was 1 where it should raise and `b[0..3]` was a wrong number. */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && idx.v.p &&
+      (recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT)) {
+    sp_Range rg = sp_range_ix(*(sp_Range *)idx.v.p);
+    if (rg.first == INTPTR_MIN)
+      sp_raise_cls("ArgumentError",
+                   "The beginless range for Integer#[] results in infinity");
+    { sp_int lo = rg.first;
+      sp_int len = (rg.last == INTPTR_MAX) ? 64 : (rg.last - lo + (rg.excl ? 0 : 1));
+      if (recv.tag == SP_TAG_INT) return sp_box_int(sp_int_bit_range(recv.v.i, lo, len));
+      /* a Bignum has no word to shift: read the field a bit at a time, which
+         is at most 64 of them and only on this cold path */
+      { sp_int out = 0, n = (len <= 0 || len > 64) ? 64 : len;
+        for (sp_int k = 0; k < n; k++)
+          if (sp_poly_int_bit(recv, lo + k)) out |= (sp_int)((uint64_t)1 << k);
+        return sp_box_int(out); } }
+  }
+  /* a Float index into a boxed Struct (or another object read by member
+     index) is cut to the Integer it converts to, as a typed read cuts it */
+  if (idx.tag == SP_TAG_FLT && recv.tag == SP_TAG_OBJ && recv.cls_id >= 0 && sp_obj_to_h_fn)
+    sp_float_arg_check(idx.v.f);
+  if (idx.tag == SP_TAG_FLT && recv.tag == SP_TAG_OBJ && recv.cls_id >= 0 && sp_obj_to_h_fn &&
+      idx.v.f > -2147483649.0 && idx.v.f < 2147483648.0)
+    idx = sp_box_int((sp_int)idx.v.f);
+  sp_int i = (idx.tag == SP_TAG_INT) ? idx.v.i : 0;
+  /* Struct#[n] is the nth MEMBER, in declaration order -- the order #to_h
+     preserves -- not an array index (#3369). */
+  if (idx.tag == SP_TAG_INT && recv.tag == SP_TAG_OBJ && recv.cls_id >= 0 && sp_obj_to_h_fn) {
+    sp_RbVal hh = sp_obj_to_h_fn(recv);
+    if (hh.tag == SP_TAG_OBJ && hh.cls_id == SP_BUILTIN_SYM_POLY_HASH) {
+      sp_SymPolyHash *sh = (sp_SymPolyHash *)hh.v.p;
+      sp_int n = sh->len;
+      sp_int k = i < 0 ? n + i : i;
+      if (k < 0 || k >= n) return sp_box_nil();
+      return sh->vals[sh->order[k]];
+    }
+  }
+  /* An Integer key is an Integer key. The generic read below takes a bare
+     sp_int and, for a symbol- or string-keyed hash, reads it as that kind's
+     key -- so `h[0]` on `{a: 1}` came back as whatever symbol 0 happens to be
+     rather than nil (#3509). Those storages cannot hold an Integer key at all,
+     so the answer is the Hash's default; the two that can look it up. */
+  if (idx.tag == SP_TAG_INT && recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id)) {
+    /* a miss answers the hash's default, nil for a plain hash (#5544) */
+    if (recv.cls_id == SP_BUILTIN_INT_INT_HASH) {
+      sp_int v = sp_IntIntHash_get_opt((sp_IntIntHash *)recv.v.p, i);
+      return v == SP_INT_NIL ? sp_box_nil() : sp_box_int(v);
+    }
+    if (recv.cls_id == SP_BUILTIN_INT_STR_HASH)
+      return sp_box_nullable_str(sp_IntStrHash_get((sp_IntStrHash *)recv.v.p, i));
+    return sp_poly_hash_foreign_miss(recv, idx);
+  }
+  /* Integer#[]: one bit of the receiver, a Bignum's included (#4665) */
+  if (idx.tag == SP_TAG_FLT && (recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT))
+    return sp_box_int(sp_poly_int_bit(recv, recv.tag == SP_TAG_BIGINT
+                       ? sp_float_arg_i(idx.v.f) : sp_poly_bit_index_arg(idx)));
+  if (idx.tag == SP_TAG_INT && (recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT))
+    return sp_box_int(sp_poly_int_bit(recv, idx.v.i));
+  /* any other kind of key (a Float, nil, an Array, ...) is no key of a String-,
+     Symbol- or Integer-keyed Hash: a miss, not a read of key 0 */
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id) &&
+      recv.cls_id != SP_BUILTIN_POLY_POLY_HASH)
+    return sp_poly_hash_foreign_miss(recv, idx);
+  /* An Integer read by nil, true, a Bignum, a Rational or a Complex falls to
+     the last line and answers bit 0. Below the Hash arms and the Integer's
+     own arms: only an Integer read by one of those passes this test. */
+  if (SP_UNLIKELY(recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT)) return sp_poly_int_bit_other(&recv, idx);
   return sp_poly_arr_get_hash(recv, i);
 }
 
