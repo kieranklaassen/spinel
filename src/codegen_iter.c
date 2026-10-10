@@ -5026,12 +5026,7 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
        handler: its frame sits between them, so re-raise there, as the
        begin..ensure epilogue in codegen_stmt.c does. Handed straight to the
        enclosing ensure, the rescue never ran and the ensure ran twice. */
-    if (g_exc_frame_depth > outer->exc_base + 1)
-      buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
-                 eid, eid, eid, eid);
-    else
-      buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
-                 eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
+    emit_ensure_exc_out(b, indent, eid, outer);
   }
   else {
     {
