@@ -1,0 +1,46 @@
+--- message v1
++++ message v4
+@@ -13,11 +13,28 @@
+ 
+ The case asks the handle after the plain String and searches by its
+ text, in a program whose boxes tagged as handles are handles
+-(g_strbuf_boxes) and that has no String#== of its own; any other keeps
+-master's C. The switch is written wherever include?, member? or key?
+-has a boxed receiver and a boxed argument, so in a program that holds
+-a handle the C of such a call changes whatever the receiver holds; a
+-Set, a Hash or a Range does not run the case.
++(g_strbuf_boxes); any other keeps master's C. So does:
++
++- a program that has, or may have, an == or a method of the call's
++  name of its own, in any class: by a def in String (builtin_reopened)
++  or by the walk the commit beneath asks (an_prog_never_gives: a def
++  or a Symbol of the name anywhere, or a site where a method is named,
++  made, mixed in or loaded by something the text does not spell:
++  `alias == equal?`, a rescued `String.define_method(:==) { }`). A
++  package's Ruby is the program's text to that walk;
++- member? in a program that may have an `each` of its own, asked the
++  same way: member? is Enumerable's in CRuby and walks by `each`, and
++  this case asks neither. Under
++  `module Enumerable; def member?(x) = false; end` and under
++  `class Array; def each; self; end; end` master's false is CRuby's
++  answer;
++- key?, which an Array does not have in CRuby: it raises there, and
++  under a rescue master's false is the rescued answer.
++
++The switch is written wherever include? or member? has a boxed
++receiver and a boxed argument, so in a program that holds a handle the
++C of such a call changes whatever the receiver holds; a Set, a Hash or
++a Range does not run the case.
+ 
+ Cost: none where the C stays. In a program that holds a handle
+ (callgrind, 300,000 turns of two calls on a boxed String Array, gcc
+@@ -26,6 +43,8 @@
+ Integer and nil.
+ 
+ Test: test/boxed_str_array_include_boxed_handle.rb (expected from CRuby
+-3.3.6).
++3.3.6). Five programs that are right on master and kept:
++test/boxed_str_array_member_own_member.rb, _member_own_each.rb,
++_member_own_each_defined.rb, _include_own_eq_alias.rb, _key_rescued.rb.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
