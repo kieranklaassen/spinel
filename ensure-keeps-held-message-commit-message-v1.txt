@@ -1,0 +1,49 @@
+An ensure keeps the message of the exception it holds while its body runs
+
+While an ensure body runs, the exception that is raised again after
+it waits as a class and a raw message in C locals. The message does
+not outlive the body. A begin the body enters takes the slot the
+message was read from, and an inner ensure that hands its exception
+to the ensure around it has popped that slot's frame, so the first
+collection in the body frees the message, and the rescue that takes
+the exception afterwards reads freed bytes:
+
+    def go(n)
+      raise ArgumentError, "the message of error number " + n.to_s
+    ensure
+      begin
+        churn
+      rescue TypeError
+      end
+      churn
+    end
+
+    begin
+      go(0)
+    rescue => e
+      puts e.message
+    end
+
+prints a string churn built, in a plain run at every level. The
+report of an uncaught exception and a thread's join read the same
+bytes.
+
+An exception that reaches the ensure with no object is given one at
+its entry, the one $! reads in the body and a raise in the body takes
+as its cause. That object is kept alive while the body runs, and it
+owned a copy of the message. It now holds the raw message itself in
+the copy's place (sp_exc_new_for_ensure) where the two are the same
+bytes, so the message lives for as long as the body can see the
+object. The entry statement calls that function where it called
+sp_exc_new_for_catch, and nothing else in the generated C changes:
+the raise after the body, and the hand to an ensure or a block's
+region around it, are the C they were, and each copies the message
+before anything can collect.
+
+A message with a NUL in it travels counted, which the object's copy
+decodes, and a raise with no message carries an empty string the
+object answers with its class's name: those two are left as they
+were. So is an exception that came as an object. The rescue still
+builds its own object, of the class's own size.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
