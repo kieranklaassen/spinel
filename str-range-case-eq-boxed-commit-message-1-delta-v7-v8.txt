@@ -1,0 +1,127 @@
+--- message 1 v7, on the handoff
++++ message 1 v8
+@@ -3,7 +3,7 @@
+     h = {"k" => "ab", "n" => 5}
+     r = ("aa".."az")
+     p r === h["k"]
+-    p ["c", 5, "q", nil].grep("a".."m")
++    p ["c", 5, "q", nil].select { |e| ("a".."m") === e }
+ 
+ printed `false` and `[]`; CRuby prints `true` and `["c"]`.
+ 
+@@ -14,59 +14,73 @@
+ 7 and was not left out, so `("aa".."az") === x` asked whether the Range
+ equals x. No String does.
+ 
+-The arm leaves 7 out as well, and emit_range_call answers: a plain
+-String is covered by its bytes and length, and so is the text of a
+-shared String handle (an appended String). grep and grep_v with a
+-String Range, and a block that asks `===` of each element, are right
+-with it.
+-
+-A value that holds no String is not covered. That includes an object
+-with a <=> of its own, which CRuby asks and this call does not, before
+-or after. One answer changes beside the String's: a boxed String Range
+-equal to the receiver was `true` and is `false`, as in CRuby, where a
+-Range is no member of itself.
++The arm leaves 7 out as well, and emit_range_call answers a value that
++holds a String: a plain String is covered by its bytes and length, and
++so is the text of a shared String handle (an appended String).
++
++Any other value is asked what it was asked, the same sp_poly_eq of the
++boxed Range and the value, so no answer changes for a value that holds
++no String. One test on the tag sends such a value there. A value the
++argument has just made is held while the Range is boxed. Master's
++expression holds neither: with both made where the === is written, it
++answered `false` for an equal Range at SPINEL_GC_STRESS=2.
+ 
+ Master's C stays where cover? of the Range keeps it (the commit
+ beneath): in a program that has, or may have, a ===, a <=>, an == or a
+ succ of its own, in any class (this call does not ask them, before or
+ after), and in one where that commit does not say what a box tagged as
+ a handle holds: it stores the String of a method call the scan does
+-not follow.
+-
+-It stays as well in a program that may have an `each` of its own
+-(an_prog_never_gives, the walk the commit beneath asks: a def of that
+-name anywhere, the Symbol :each, or a site where a method is named,
+-made, mixed in or loaded by something the text does not spell; a
+-package's Ruby is the program's text to it, so a program that requires
+-set or csv stays too). grep and grep_v ask this `===` of each element,
+-and over an Array they walk as the builtin does where CRuby walks by
+-the `each` the program gave it:
++not follow. "May have" is an_prog_never_gives, the walk that commit
++asks: a def of the name anywhere, its Symbol, or a site where a method
++is named, made, mixed in or loaded by something the text does not
++spell; a package's Ruby is the program's text to it. That is one
++answer for the program, and srange_eqq_covers_boxed holds it once.
++
++It stays as well at a `===` the compiler's own Ruby asks
++(enum_builtin_node). grep and grep_v ask it of each element there, and
++they are not changed here. Over an Array they run as the builtin does
++where CRuby calls the grep or walks by the `each` the program gave it:
+ 
+     class Array
+       def each
+         self
+       end
+     end
+-    p ["c", 5, "q", nil].grep("a".."m")
+-
+-prints `[]` in CRuby and on master, which finds no String for another
+-reason, and would print `["c"]` with the arm.
+-
+-Cost: none on a program master answered right. The Range is no longer
+-boxed for the question: 300,000 turns of `n += 1 if r === x` run
+-237 and 208 instructions a turn fewer for an Integer x, and 86 and 56
+-fewer for a String outside the Range (callgrind, gcc 13.3 and clang
+-18.1).
+-
+-Not here: case/when with a boxed subject (the next commit). `K === x`
+-for a constant K that holds a String Range answers false. all?, any?
+-and none? of a String Array with a String Range answer as if no element
+-matched.
+-
+-Test: test/str_range_case_eq_boxed.rb (expected from CRuby 3.3.6), run
+-under GC stress by its header line. Three programs with an `each` of
+-their own on Array, each right on master and kept:
+-test/str_range_grep_own_each.rb, _defined.rb (define_method),
+-_prepended.rb (a prepended module).
++    m = ["c", 5, "q", nil]
++    p m.grep("a".."m")
++    p m.select { |e| ("a".."m") === e }
++
++prints `[]` and `["c"]` in CRuby. Master printed `[]` twice, the first
++for another reason, and that one is kept. A method the program itself
++names `__enum_...` reads as the compiler's Ruby, and a `===` in it
++keeps master's answer too.
++
++Cost (callgrind, 300,000 turns of `n += 1 if r === x`, gcc 13.3 and
++clang 18.1). For a String outside the Range a turn runs 86 and 87
++instructions fewer: the Range is not boxed for it. For an Integer it
++runs 12 and 3 more, the test that tells a String from the rest ahead of
++the equality it had.
++
++Not here: case/when with a boxed subject (the next commit). grep and
++grep_v, as above. A boxed String Range equal to the receiver still
++answers `true`; CRuby says `false` unless the program gives Range a
++to_str or a method_missing. `K === x` for a constant K that holds a
++String Range answers false. all?, any? and none? of a String Array
++with a String Range answer as if no element matched.
++
++Tests, expected from CRuby 3.3.6. New answers:
++test/str_range_case_eq_boxed.rb, run under GC stress by its header
++line, and the select line of test/str_range_grep_own_each.rb. Answers
++of master's that are kept: the grep line of that program and
++test/str_range_grep_own_each_defined.rb (define_method) and
++test/str_range_grep_own_each_prepended.rb (a prepended module); a grep
++or a grep_v the program gave Array, in test/str_range_grep_own_grep.rb,
++test/str_range_grep_own_grep_alias.rb (alias_method) and
++test/str_range_grep_own_grep_v.rb; a Range with a to_str or a
++method_missing as the value, in test/str_range_case_eq_range_to_str.rb
++(under GC stress; its last line is the one master lost at stress 2)
++and test/str_range_case_eq_range_method_missing.rb; a === and a <=> of
++the program's own, in test/str_range_case_eq_own_eqq.rb and
++test/str_range_case_eq_own_compare.rb.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>

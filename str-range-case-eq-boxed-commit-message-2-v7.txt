@@ -1,0 +1,60 @@
+when with a String Range takes a boxed String subject
+
+    def band(v)
+      case v
+      when "a".."m" then "low"
+      when "n".."z" then "high"
+      when 1..9 then "digit"
+      else "other"
+      end
+    end
+    puts band("c"), band("q"), band(5), band(nil)
+
+printed `other`, `other`, `digit`, `other`; CRuby prints `low`, `high`,
+`digit`, `other`.
+
+v is boxed: it is given a String, an Integer and nil.
+emit_when_typed_test has an arm for a String subject against a String
+Range, and for a boxed subject against an Integer or a Float Range, and
+none for a boxed subject against a String Range. The when fell to the
+equality of the subject and the boxed Range, which no String satisfies.
+
+The arm is added, and it answers as the Range's own === answers a
+boxed argument (the commit before). A subject that holds a String is
+covered by its bytes and length, the plain one and the text of a
+shared String handle alike. Any other subject keeps the equality the
+when fell to, the same sp_poly_eq of the subject and the boxed Range,
+so no answer changes for a subject that holds no String. One test on
+the tag sends it there.
+
+Master's C stays where `===` of the Range keeps it
+(srange_eqq_covers_boxed, the commit before): in a program that has or
+may have a ===, a <=>, an == or a succ of its own, in any class, in
+one where it is not said what a box tagged as a handle holds, and at a
+when in the compiler's own Ruby.
+
+Cost (callgrind, 300,000 turns, gcc 13.3 and clang 18.1). A case with
+the one arm, reached by a String outside the Range, runs 79 and 85
+instructions a turn fewer: the Range is not boxed for it. Reached by an
+Integer it runs 6 and 2 more, the test that tells a String from the rest
+ahead of the equality it had. An arm that is not reached, behind a `when
+1` the subject takes: a turn of two such cases runs 1 more with gcc and
+0 with clang, 0 and 2 where the case runs in a block and 2 and 0 with
+the Range in a local. The arm adds nothing to that path; the C compiler
+lays out the code ahead of it otherwise.
+
+Not here: a boxed String Range equal to the arm's still takes the arm;
+in CRuby it does only if the program gives Range a to_str or a
+method_missing.
+
+Tests, expected from CRuby 3.3.6. New answers:
+test/case_when_str_range_boxed.rb, run under GC stress by its header
+line, and test/case_when_str_range_own_each.rb, whose `each` on Array
+is no part of what the when asks. Answers of master's that are kept: a
+Range with a to_str or a method_missing as the subject, in
+test/case_when_str_range_range_to_str.rb (under GC stress) and
+test/case_when_str_range_range_method_missing.rb; a === and a <=> of
+the program's own, in test/case_when_str_range_own_eqq.rb and
+test/case_when_str_range_own_compare.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
