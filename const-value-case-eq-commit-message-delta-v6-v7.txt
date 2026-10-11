@@ -1,0 +1,199 @@
+--- message v6, on the handoff
++++ message v7
+@@ -10,8 +10,8 @@
+ emit_call_identity_arms reads every `K === x` with a bare constant for
+ its receiver as `Class === x`, the test whether x is an instance of the
+ class K names. A constant the program gave a value names no class: no x
+-passed, and the call was written as false. The same value in a local
+-was asked its own ===, and so were `when LIMIT`, `grep(LIMIT)` and
++passed, and the call was written as false. The same value in a local was
++asked its own ===, and so were `when LIMIT`, `grep(LIMIT)` and
+ `M::LIMIT === x`.
+ 
+ const_value_eqq takes such a call out of the class arm, and the === a
+@@ -19,73 +19,126 @@
+ Array and a Hash compare by ==, an object with a === of its own is
+ asked.
+ 
+-It takes the call only where x is one node that runs nothing: a number,
+-a String or a Symbol written out, nil, true, false, self, a local, an
+-instance or a class variable, a constant of the program. The value's
+-=== reads the constant in one C expression with x, in the order the C
+-compiler picks. An x that changes the constant's String in place or
+-binds the constant anew would be read before the constant by one
++It takes the call only where CRuby's lookup must reach that value. A
++constant's read is typed by its name alone, and CRuby reads a bare name
++by where it stands: `Foo === x` outside the class that holds `Foo = 3`
++is whatever Foo names there, a class of the program, one of CRuby's own
++that no table of the compiler lists (Marshal), or one a file brings that
++the compiler did not read. So the call is taken only where:
++
++- the constant is bound once in the whole program, by a plain write, and
++  the call stands in the same class or module body as that write, or
++  both at the top level (const_bound_where_read, from the node table).
++  CRuby asks that body's own table first. A name written under two paths
++  counts by its last part, since two paths can name one class
++  (`class Object`, `class A::X`, `Y = X; class Y`);
++- no call can bind the name anew or take it away: the program as written
++  holds no Symbol of the name and no site where a method is named, made,
++  mixed in or loaded by something the text does not spell
++  (an_prog_never_gives), and no const_set or remove_const, as a call or
++  as a Symbol. Such a call is one the compiler does not perform: it
++  raises NoMethodError, the program can rescue it and run on, and in
++  CRuby the constant is another by then;
++- no test of the engine was decided (RUBY_ENGINE, RUBY_VERSION,
++  `defined?(RubyVM)`): the node table no longer holds the arm CRuby
++  runs, and a second write, a class of that name or such a call may have
++  stood in it. desugar_engine_branches notes that it decided one
++  (g_engine_decided), which by itself changes no program's C.
++
++Any other call keeps master's C and its false.
++
++And it takes the call only where x is one node that runs nothing: a
++number, a String or a Symbol written out, nil, true, false, self, a
++local, an instance or a class variable, a constant of the program. The
++value's === reads the constant in one C expression with x, in the order
++the C compiler picks. An x that changes the constant's String in place
++or binds the constant anew would be read before the constant by one
+ compiler and after it by the other, where master's false is CRuby's
+ answer with both. So `K === f(n)`, `K === h["k"]`, `K === n + 1`,
+ `K === [1, 2]` and a literal in parentheses stay in the class arm.
+ 
+ It answers for the kinds of K and x it lists, the ones where that ===
+-answers as CRuby does on master. Every other pair stays in the class
+-arm with its false, right or wrong as before: an Integer or a Symbol
+-against an Array, a Hash or a Range (there that === raises
+-NoMethodError), a String against an Array, a Bignum against a Float and
+-a Float against a Bignum (they do not build), an object of the program
+-as x (the value asks it nothing, where CRuby asks its ==), and the
+-kinds the list does not name, a Complex or a Rational among them.
+-
+-A Range or a Float Range takes an Integer only where it is written as
+-a literal. The nil of an Integer is a sentinel in its slot: in a local
+-a beginless Range covers it and a Float Range can raise TypeError,
+-where the class arm's false is CRuby's answer. Nothing says for sure
+-that a slot cannot hold it: nullable_int_value does not mark an ivar
+-never assigned or a fetch with a nil default. So `LIMIT === n` for an
+-Integer in a variable is false still.
+-
+-A name that a class or a module of the program bears too stays there
+-as well. A constant's read is typed by its name alone, so `Foo === x`
+-outside the class that holds `Foo = 3` would be read as the 3.
++answers as CRuby does on master. Every other pair is left to the class
++arm as before, right or wrong: an Integer or a Symbol against an Array,
++a Hash or a Range (there that === raises NoMethodError), a String
++against an Array, a Bignum against a Float and a Float against a Bignum
++(they do not build), an object of the program as x (the value asks it
++nothing, where CRuby asks its ==), and a constant of a kind the list
++does not name, a Complex among them.
++
++A Range or a Float Range takes an Integer only where it is written as a
++literal. The nil of an Integer is a sentinel in its slot: in a local a
++beginless Range covers it and a Float Range can raise TypeError, where
++the class arm's false is CRuby's answer. Nothing says for sure that a
++slot cannot hold it: nullable_int_value does not mark an ivar never
++assigned or a fetch with a nil default. So `LIMIT === n` for an Integer
++in a variable is false still.
+ 
+ Checked on 1,296 programs, every pair of 24 values of K and 27 of x in
+-the constant form and in the local form, x held in a local: 28 of the
+-648 constant forms go from false to CRuby's answer, no answer that was
+-right changes with gcc or with clang, and the local forms compile to
+-the same C.
+-
+-A call that answered false and was right now runs the comparison it
+-names, where master wrote the constant false: 11 to 81 instructions a
+-call by the kind (callgrind, gcc 13.3 and clang 18.1), the dearest an
+-Integer Range against a literal Integer. Nothing where the two kinds
+-cannot be equal, and less than the class test did where x is a Symbol.
+-Against the same value in a local it is within 2 instructions, but for
+-an object with a === of its own, which costs 16 (gcc) and 20 (clang)
+-more than through a local. Compiling such a line runs about 3,700 more
+-instructions where K holds an Integer and 5,100 to 6,400 where it holds
+-a String (callgrind over `spinel -c`): behind ten lines that set the
+-constants (LIMIT = 9 there) and the locals, 2,000 lines
+-`x = LIMIT === v` compile with 0.42% more instructions, 2,000 lines
+-`x = NAME === s` with 0.76%, and 2,000 bare lines `NAME === s` with
+-0.98%. A Range or an object with a === of its own costs more: a line
+-runs 18,200 more instructions for an Integer Range against a literal
+-Integer (2.3% over 2,000 such lines), 18,300 to 21,300 for a String
+-Range (2.4% to 2.7%), 31,000 to 33,200 for a Float Range (4.0% to
+-4.3%) and 65,700 to 70,500 for the object (7.4% to 8.0%). That is the
+-comparison being written where master wrote `false`: asked by name on
+-the same constant, master pays the like today for an Integer Range
+-(`K.cover?(9)`) and for the object (a method of its own), and less for a
+-String Range and for a Float Range against a literal. One line that asks
+-such an object, in a program where no local holds one of its class, adds
+-0.6% to the whole compile: the call roots its receiver, and master lays
+-out the function's frame of roots once, as it does for any call on that
+-constant. A line left in the class arm costs 400 to 500: const_value_eqq
+-looks at the operand and the two kinds before it walks the table of
+-builtin class names.
++the constant form and in the local form, x held in a local, with
++--share-strings and without: 28 of the 648 constant forms go from false
++to CRuby's answer, no answer that was right changes with gcc or with
++clang, and each local form compiles to the same C or, for 7 of the 648,
++is refused as on master.
++
++Cost at run time: a call that answered false and was right now runs the
++comparison it names, where master wrote the constant false. In
++instructions a call (callgrind, 300,000 turns of `n += 1 if K === v` in
++a while loop at the top level, every answer false, gcc 13.3 / clang
++18.1, counted with the constant's line above the locals' and below
++them):
++
++- a String Range 86.5 / 86, a String Array 86.5 / 92.5, an Integer Range
++  against a literal Integer 81 / 81, a Hash 78 to 78.5 / 72.5;
++- a String 32 to 34 / 57, a Float Range 34.5 / 34, an Integer Array 26 /
++  32.5, an object with a === of its own 22 / 26;
++- a Float 9.5 / 10, an Integer 8 / 3, a Symbol 0 to 8 / 0;
++- nothing where the two kinds cannot be equal (an Integer or a Float
++  against a String, a String against an Integer or a Float, a Symbol
++  against an Integer or a String): the count is master's.
++
++That is the comparison a local reaches: against the same value in a
++local the call is within 2 instructions either way, but for an object
++with a === of its own, 14 / 23 more (a read of that constant tests that
++its initializer is done, as every read of it does on master), and a
++Symbol, 0 to 8 / 0 more.
++
++Cost at compile time (callgrind over `spinel -c`, the compiler alone,
++2,000 such lines behind a few that set the constants and a local of each
++kind): a line runs 5,100 to 7,400 more instructions where K holds an
++Integer, a Float, a Symbol, a String or an Integer Array (0.61% to 0.91%
++of that compile), and 20,300 for an Integer Range against a literal
++Integer (2.6%), 23,200 for a String Range (2.9%), 35,100 for a Float
++Range (4.4%) and 76,500 for an object with a === of its own (8.4%). That
++is the comparison being written where master wrote `false`: asked by
++name on the same constant, master pays 22,700 a line for `K.cover?(9)`,
++26,500 for a Float Range's `cover?` and 65,500 for a method of the
++object. One line that asks such an object, in a program where no local
++holds one of its class, adds 0.7% to the whole compile: the call roots
++its receiver, and master lays out the function's frame of roots once, as
++it does for any call on that constant. A line left in the class arm
++costs about 400: const_value_eqq looks at the operand and the two kinds
++before it asks where the name is bound. Asking that is one walk of the
++node table a program, at the first call that gets so far: a program of n
++constants with one such call each compiles with 0.42% more instructions
++at n = 1,000 and 0.32% at 2,000 (6,600 and 6,800 a line). A === on a
++local pays 20 instructions a line at compile time, and a program with no
++=== pays 1.
++
++Not here: a `K === x` whose constant is read outside the body that binds
++it (a method of a subclass, a class nested in that body, `::K` inside a
++class) or is bound twice or under two spellings of one class, and every
++such call in a program that holds a const_set or a remove_const, a site
++the text does not spell, or a test of the engine the compiler decides,
++stays false, right or wrong as on master. So does `K === x` for an x
++that is a call, an index, an operator or a literal in parentheses, and
++`LIMIT === n` for an Integer n in a variable. `K === x` for a String
++Range constant and a boxed String x answers false, as the local does.
+ 
+ Tests: test/const_value_case_eq.rb, and
+-test/const_value_case_eq_bignum.rb for the Bignum pairs.
++test/const_value_case_eq_bignum.rb for the Bignum pairs (expected from
++CRuby 3.3.6). Five programs that are right on master and kept:
++test/const_value_case_eq_const_set.rb, _core_name.rb, _engine_arm.rb,
++_engine_value.rb, _other_spelling.rb.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
