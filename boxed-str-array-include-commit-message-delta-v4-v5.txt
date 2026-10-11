@@ -1,0 +1,84 @@
+--- message v4, on the handoff
++++ message v5
+@@ -22,29 +22,61 @@
+   made, mixed in or loaded by something the text does not spell:
+   `alias == equal?`, a rescued `String.define_method(:==) { }`). A
+   package's Ruby is the program's text to that walk;
+-- member? in a program that may have an `each` of its own, asked the
+-  same way: member? is Enumerable's in CRuby and walks by `each`, and
+-  this case asks neither. Under
+-  `module Enumerable; def member?(x) = false; end` and under
++- include? and member? in a program that may have an `each` of its
++  own, asked the same way. CRuby's member? is Enumerable's and walks
++  by `each`; and CRuby walks by `each` as well to make what master
++  holds as the receiver (a blockless to_enum, entries, sort_by) and to
++  run the block around the call. This case asks none of that. Under
+   `class Array; def each; self; end; end` master's false is CRuby's
+-  answer;
++  answer for `bw.member?(x)`, for `bw.to_enum.include?(x)` and for
++  `bw.entries.include?(x)`, and a call in a block that `each` does
++  not run is not made;
+ - key?, which an Array does not have in CRuby: it raises there, and
+   under a rescue master's false is the rescued answer.
+ 
+-The switch is written wherever include? or member? has a boxed
+-receiver and a boxed argument, so in a program that holds a handle the
+-C of such a call changes whatever the receiver holds; a Set, a Hash or
+-a Range does not run the case.
+-
+-Cost: none where the C stays. In a program that holds a handle
+-(callgrind, 300,000 turns of two calls on a boxed String Array, gcc
+-13.3 and clang 18.1), a turn runs 3 and 2 instructions more when the
+-two boxed arguments are plain Strings, and 4 more when they are an
+-Integer and nil.
+-
+-Test: test/boxed_str_array_include_boxed_handle.rb (expected from CRuby
+-3.3.6). Five programs that are right on master and kept:
+-test/boxed_str_array_member_own_member.rb, _member_own_each.rb,
+-_member_own_each_defined.rb, _include_own_eq_alias.rb, _key_rescued.rb.
++The switch is written wherever include? or member? has a boxed receiver
++and a boxed argument, so in a program that holds a handle the C of such
++a call changes whatever the receiver holds. Receiver and argument stay
++in the root frame where either may allocate, and the case's own read
++allocates nothing.
++
++Cost: none where the C stays. In a program that holds a handle, in
++instructions a turn of two calls (callgrind, 300,000 turns in a while
++loop at the top level on a boxed Array of three Strings, gcc 13.3 /
++clang 18.1, counted with the Array made before the Hash that holds the
++appended String and after it):
++
++- an appended String that is not in the Array is now searched for, where
++  master answered without looking: +362 to +363 / +359, for include?,
++  for member? and for a call's result alike. The search is master's own
++  (sp_StrArray_include), 171 / 168 instructions a call, which is what a
++  plain String that is not there pays on master;
++- two calls with plain Strings: +2 / +2 where both find theirs; where
++  one or neither does, +1 to +3 with gcc and +2 with clang, and with the
++  loop in a block +1 / 0. gcc tests the answer after the two arms have
++  joined, one jump more a call than master's line;
++- an Integer and nil: +4 / +4, and +4 / +4 for a call's result that is
++  an Integer: the one test that tells a handle from a value that holds
++  no String.
++
++Not here: include? in a program that has or may have an `each` of its
++own keeps master's false as well, also where CRuby's include? would not
++walk by it (a plain `bw.include?(x)` outside any block): the price of
++asking `each` for both names. A block in the argument that master runs
++ahead of the whole call (`x.then { }`, `loop { }`, `catch { }`,
++`instance_eval { }`) and that gives the receiver another Array is asked
++of that new Array, where CRuby asks the one it replaced: with a local
++variable as the receiver, and without --share-strings with a Struct
++member as well. That is master's order, and a typed String shows it on
++master as well; an appended String, for which master's `false` was
++CRuby's answer by chance, is now asked in that order too.
++
++Tests: test/boxed_str_array_include_boxed_handle.rb and
++test/boxed_str_array_include_boxed_handle_collected.rb, the second under
++GC stress by its header line, with the Array, the String or both held by
++the call alone (expected from CRuby 3.3.6). Six programs that are right
++on master and kept: test/boxed_str_array_member_own_member.rb,
++_member_own_each.rb, _member_own_each_defined.rb, _include_own_each.rb,
++_include_own_eq_alias.rb, _key_rescued.rb.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
