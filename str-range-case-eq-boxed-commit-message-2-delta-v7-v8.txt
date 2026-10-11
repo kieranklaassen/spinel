@@ -1,0 +1,74 @@
+--- message 2 v7, on the handoff
++++ message 2 v8
+@@ -27,6 +27,19 @@
+ so no answer changes for a subject that holds no String. One test on
+ the tag sends it there.
+ 
++With --share-strings a Range a variable holds is read live for the when,
++and one written in the when with two ends that hold no call
++(operand_holds_no_call: each the read of a local, an instance variable,
++a class variable or a constant, self, or a plain String literal) is made
++there with nothing run since, so their ends are compared as they are. A
++global is a variable's read and holds no call too; the helper does not
++take it, and a Range written with one is read again. Any other Range
++hands on copies that may be stale, a Struct member's or a reader's the
++ones it was made with, one written there with a call in an end the first
++end as it was before that call ran: there the String is covered by the
++ends read from the Strings the Range keeps (sp_srange_cover_boxed_now),
++as === covers it.
++
+ Master's C stays where `===` of the Range keeps it
+ (srange_eqq_covers_boxed, the commit before): in a program that has or
+ may have a ===, a <=>, an == or a succ of its own, in any class, in
+@@ -41,20 +54,44 @@
+ 1` the subject takes: a turn of two such cases runs 1 more with gcc and
+ 0 with clang, 0 and 2 where the case runs in a block and 2 and 0 with
+ the Range in a local. The arm adds nothing to that path; the C compiler
+-lays out the code ahead of it otherwise.
++lays out the code ahead of it otherwise. With --share-strings a when
++with a variable's Range, or with one written there of two locals or two
++literals, costs within one instruction of this commit without that; one
++written there with two globals reads the ends again, 22.5 to 23.25 and
++15.5 to 16.25 more a turn, as does one with a call in an end, 19.5 to
++20.25 and 15.5 to 16.25 more; with a Struct member's Range, 21 to 22 and
++23 more a turn for an appended String, 37 to 38 and 24 more for a plain
++one, 1 and 6 more for an Integer. Each figure was counted in two orders
++of the program's lines, the Range's Strings made before the Hash that
++holds the appended String and after it, and is the least and the
++greatest of the two where they differ.
+ 
+ Not here: a boxed String Range equal to the arm's still takes the arm;
+ in CRuby it does only if the program gives Range a to_str or a
+-method_missing.
++method_missing. An end the other end's code changes while the Range is
++written in the when (an append `when (a..(a << "z"))`, a run of
++statements, a method's or a block's value) is compared as master's Range
++holds it wherever master writes the two ends as operands of one C call,
++so that which is read first is the C compiler's: the default build, and
++--share-strings where master keeps no shared String for the two ends.
++There a boxed String for which master's `false` was CRuby's answer by
++chance can take the arm, as the same when takes a plain String on
++master.
+ 
+ Tests, expected from CRuby 3.3.6. New answers:
+ test/case_when_str_range_boxed.rb, run under GC stress by its header
+-line, and test/case_when_str_range_own_each.rb, whose `each` on Array
+-is no part of what the when asks. Answers of master's that are kept: a
++line, and test/case_when_str_range_own_each.rb, whose `each` on Array is
++no part of what the when asks. Answers of master's that are kept: a
+ Range with a to_str or a method_missing as the subject, in
+ test/case_when_str_range_range_to_str.rb (under GC stress) and
+-test/case_when_str_range_range_method_missing.rb; a === and a <=> of
+-the program's own, in test/case_when_str_range_own_eqq.rb and
+-test/case_when_str_range_own_compare.rb.
++test/case_when_str_range_range_method_missing.rb; a === and a <=> of the
++program's own, in test/case_when_str_range_own_eqq.rb and
++test/case_when_str_range_own_compare.rb. With --share-strings only,
++since the default build promises no changed end (docs/limitations.md, "A
++String Range keeps copies of its endpoints"):
++test/share/case_when_str_range_boxed_member.rb, a Range in a Struct
++member and one in a local, before and after an end is changed in place,
++and one written in the when whose second end's code changes the first;
++make share-strings-test runs it.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>

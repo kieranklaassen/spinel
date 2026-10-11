@@ -1,0 +1,109 @@
+--- message 1 v8, on the handoff
++++ message 1 v9
+@@ -18,6 +18,20 @@
+ holds a String: a plain String is covered by its bytes and length, and
+ so is the text of a shared String handle (an appended String).
+ 
++With --share-strings a Range a variable holds is read as a copy of each
++end (sp_srange_live), and nothing holds those copies while the
++argument's call allocates. Where the Range is read so and the argument
++cannot give that variable another Range (read_rebound_by, master's own
++test), === runs the argument first and reads the Range after it: nothing
++runs between that read and the compare, and an end the argument changed
++is read as it is. Any other Range, a Struct member's or a reader's, one
++written at the === or one the argument may rebind, is read first, as
++master reads it. There a String, the plain one and the handle's alike,
++is covered by the ends read from the Strings the Range keeps, once the
++argument is there (sp_srange_cover_boxed_now), and for a value that
++holds no String the temp is rooted before an argument that may allocate,
++as master roots a Range no name holds.
++
+ Any other value is asked what it was asked, the same sp_poly_eq of the
+ boxed Range and the value, so no answer changes for a value that holds
+ no String. One test on the tag sends such a value there. A value the
+@@ -38,8 +52,9 @@
+ 
+ It stays as well at a `===` the compiler's own Ruby asks
+ (enum_builtin_node). grep and grep_v ask it of each element there, and
+-they are not changed here. Over an Array they run as the builtin does
+-where CRuby calls the grep or walks by the `each` the program gave it:
++this commit does not change them. Over an Array they run as the builtin
++does where CRuby calls the grep or walks by the `each` the program gave
++it:
+ 
+     class Array
+       def each
+@@ -59,28 +74,63 @@
+ clang 18.1). For a String outside the Range a turn runs 86 and 87
+ instructions fewer: the Range is not boxed for it. For an Integer it
+ runs 12 and 3 more, the test that tells a String from the rest ahead of
+-the equality it had.
++the equality it had. With --share-strings, against this commit without
++that: where the argument runs first a turn costs within one instruction
++of it for an appended String, a plain String and an Integer held in a
++local; with a call's result as the argument, 18 to 21 and 12 more for a
++plain String, which is rooted while the Range is read, and 3 to 4 and 1
++to 3 fewer for a value that holds no String (21 and 17 more than
++master). Where a Struct member holds the Range it is read first: 20 and
++23 more a turn for an appended String, 42 to 43 and 24 more for a plain
++one, 3 and 6 more for an Integer, and with a call's result 25 and 15 to
++18 more for a plain String and 4 and 0 more for a value that holds no
++String, the temp's root (28 and 25 to 28 more than master). A Range
++written at the === is read first whatever its ends: with two literals 20
++and 17 more a turn for an appended String and 33 and 18 more for a plain
++one, with two locals 18.5 to 19.25 and 15.5 to 16.25 more and 41.81 and
++16.5 to 17.25 more, with two globals 18.5 to 19.25 and 15.5 to 16.25
++more for an appended String; an Integer there costs within two
++instructions of this commit without that. Each figure was counted in two
++orders of the program's lines, the Range's Strings made before the Hash
++that holds the appended String and after it, and is the least and the
++greatest of the two where they differ; a Range written at the === with
++two literals makes no Strings of its own and was counted in the one
++order.
+ 
+ Not here: case/when with a boxed subject (the next commit). grep and
+ grep_v, as above. A boxed String Range equal to the receiver still
+ answers `true`; CRuby says `false` unless the program gives Range a
+ to_str or a method_missing. `K === x` for a constant K that holds a
+-String Range answers false. all?, any? and none? of a String Array
+-with a String Range answer as if no element matched.
++String Range answers false. all?, any? and none? of a String Array with
++a String Range answer as if no element matched. An end the other end's
++code changes while the Range is written (an append `(a..(a << "z")) ===
++x`, a run of statements, a method's or a block's value) is compared as
++master's Range holds it wherever master writes the two ends as operands
++of one C call, so that which is read first is the C compiler's: the
++default build, and --share-strings where master keeps no shared String
++for the two ends. Master answers a plain String so; a boxed one, for
++which its `false` was CRuby's answer by chance, is now answered so too.
+ 
+ Tests, expected from CRuby 3.3.6. New answers:
+-test/str_range_case_eq_boxed.rb, run under GC stress by its header
+-line, and the select line of test/str_range_grep_own_each.rb. Answers
+-of master's that are kept: the grep line of that program and
++test/str_range_case_eq_boxed.rb, run under GC stress by its header line,
++test/str_range_case_eq_boxed_collected.rb, under GC stress the same way
++(a Range asked for the String its argument's call hands on after
++allocating), and the select line of test/str_range_grep_own_each.rb.
++Answers of master's that are kept: the grep line of that program and
+ test/str_range_grep_own_each_defined.rb (define_method) and
+ test/str_range_grep_own_each_prepended.rb (a prepended module); a grep
+ or a grep_v the program gave Array, in test/str_range_grep_own_grep.rb,
+ test/str_range_grep_own_grep_alias.rb (alias_method) and
+ test/str_range_grep_own_grep_v.rb; a Range with a to_str or a
+ method_missing as the value, in test/str_range_case_eq_range_to_str.rb
+-(under GC stress; its last line is the one master lost at stress 2)
+-and test/str_range_case_eq_range_method_missing.rb; a === and a <=> of
+-the program's own, in test/str_range_case_eq_own_eqq.rb and
+-test/str_range_case_eq_own_compare.rb.
++(under GC stress; its last line is the one master lost at stress 2) and
++test/str_range_case_eq_range_method_missing.rb; a === and a <=> of the
++program's own, in test/str_range_case_eq_own_eqq.rb and
++test/str_range_case_eq_own_compare.rb. With --share-strings only, since
++the default build promises no changed end (docs/limitations.md, "A
++String Range keeps copies of its endpoints"):
++test/share/str_range_case_eq_boxed_end_changed.rb, an end the argument's
++own call changes, the Range in a local and in a Struct member; make
++share-strings-test runs it.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
