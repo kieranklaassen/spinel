@@ -9762,6 +9762,22 @@ static int rescue_operand_is_class_name(Compiler *c, int op) {
          is_builtin_exception_name(n);
 }
 
+/* Whether evaluating rescue operand `op` runs code of the program: a read of
+   a constant, through a path of constants too, or of a variable, splatted or
+   not, does not. */
+static int rescue_operand_runs_code(Compiler *c, int op) {
+  NodeKind k = nt_kind(c->nt, op);
+  if (k == NK_SplatNode) { op = nt_ref(c->nt, op, "expression"); k = nt_kind(c->nt, op); }
+  if (rescue_operand_is_class_name(c, op)) return 0;   /* matched by its name, never evaluated */
+  while (k == NK_ConstantPathNode) {
+    op = nt_ref(c->nt, op, "parent");
+    if (op < 0) return 0;   /* ::NAME */
+    k = nt_kind(c->nt, op);
+  }
+  return k != NK_ConstantReadNode && k != NK_LocalVariableReadNode && k != NK_InstanceVariableReadNode &&
+         k != NK_GlobalVariableReadNode && k != NK_ClassVariableReadNode;
+}
+
 /* exception frames a retry leaves on its way back to the body: the frame
    the rescue clauses of a begin with an ensure run in */
 static int g_retry_pops;
@@ -9794,11 +9810,13 @@ int subtree_has_retry(const NodeTable *nt, int id) {
 }
 
 /* Emit one rescue clause (and its `subsequent` chain) inside the handler
-   branch. Frame counter `fr` makes the saved cls/msg vars unique. */
-void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *resultvar) {
+   branch. Frame counter `fr` makes the saved cls/msg vars unique. `ran` says
+   an operand of a clause before this one runs code of the program. */
+static void emit_rescue_clause(Compiler *c, int id, Buf *b, int indent, int fr, const char *resultvar, int ran) {
   const NodeTable *nt = c->nt;
   int nexc = 0;
   const int *exc = nt_arr(nt, id, "exceptions", &nexc);
+  for (int i = 0; i < nexc && !ran; i++) ran = rescue_operand_runs_code(c, exc[i]);
   int ref = nt_ref(nt, id, "reference");
   int stmts = nt_ref(nt, id, "statements");
   int sub = nt_ref(nt, id, "subsequent");
@@ -10124,18 +10142,27 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
     buf_puts(b, "}\n");
     emit_indent(b, indent);
     buf_puts(b, "else {\n");
-    if (sub >= 0) emit_rescue(c, sub, b, indent + 1, fr, resultvar);
+    if (sub >= 0) emit_rescue_clause(c, sub, b, indent + 1, fr, resultvar, ran);
     else {
       /* re-stage the carried object so a pass-through keeps ivars and the
-         SystemExit status (#1415, #2761) */
+         SystemExit status (#1415, #2761). No clause took the exception, so
+         it goes on with the cause it was raised with (sp_reraise_continues).
+         Not where an operand's own code ran before this: it may have raised
+         and rescued, and the cause staged for an exception that has no
+         object is gone then, so that rescue raises anew as it did. */
       emit_indent(b, indent + 1);
-      buf_printf(b, "sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1;\n");
+      buf_printf(b, "sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1;%s\n",
+                 ran ? "" : " sp_reraise_continues = 1;");
       emit_indent(b, indent + 1);
       buf_printf(b, "sp_raise_cls(_rcls_%d, _rmsg_%d);\n", rc, rc);
     }
     emit_indent(b, indent);
     buf_puts(b, "}\n");
   }
+}
+
+void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *resultvar) {
+  emit_rescue_clause(c, id, b, indent, fr, resultvar, 0);
 }
 
 /* A deferred return or exception handed on to the enclosing ensure `outer`:
@@ -15480,7 +15507,7 @@ static void emit_stmt_node(Compiler *c, int id, Buf *b, int indent) {
        `exit 3` into a normal exit 0. */
     emit_indent(b, indent + 1);
     buf_puts(b, "if (!sp_exc_is_standard_error((const char *)sp_last_exc_cls)) {"
-                " sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1;"
+                " sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1; sp_reraise_continues = 1;"
                 " sp_raise_cls((const char *)sp_last_exc_cls, sp_exc_msg[sp_exc_top]); }\n");
     /* $! and #cause threading inside the fallback, like a full rescue arm */
     {
