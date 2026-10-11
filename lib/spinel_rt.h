@@ -2934,6 +2934,39 @@ static inline const char *sp_poly_unbox_s(sp_RbVal v) {
   if (sp_poly_is_strbuf(v) && v.v.p) return sp_String_cstr((sp_String *)v.v.p);
   return v.v.s;
 }
+/* Range#cover? of a String Range, given by its ends, for a String read off
+   a box: by its bytes as String#<=> orders them (sp_str_cmp_bytes), so a
+   NUL is a byte like any other and a binary String is not the UTF-8 one of
+   the same bytes. */
+static inline sp_bool sp_srange_cover_bytes(const char *first, const char *last, int excl, const char *x) {
+  if (!x) return 0;
+  if (first && sp_str_cmp_bytes(x, first) < 0) return 0;
+  if (last) { int d = sp_str_cmp_bytes(x, last); if (excl ? d >= 0 : d > 0) return 0; }
+  return 1;
+}
+/* The same for the String a shared handle holds; NULL, a nil stored among
+   handles, holds none. Out of line: only a handle's box comes here, and
+   the call beside it for a plain String stays as it was. */
+static SP_NOINLINE SP_COLD sp_bool sp_srange_cover_handle(const char *first, const char *last, int excl, void *h) {
+  return h && sp_srange_cover_bytes(first, last, excl, sp_String_cstr((sp_String *)h));
+}
+/* --share-strings: a Range a variable holds is read as a copy of each end
+   (sp_srange_live) before the argument is made, and nothing holds those
+   copies while the argument's call allocates. The Range itself keeps the
+   Strings its ends were made from, so for a handle's box the ends are
+   read from them again once the argument is there: as they are then, as
+   CRuby compares them. No copy is made, so nothing allocates between
+   this and the compare. An end the Range keeps no String for is read as
+   the Range has it. */
+static inline sp_StrRange sp_srange_ends_now(sp_StrRange r) {
+  if (r.hf) r.first = sp_String_cstr((sp_String *)r.hf);
+  if (r.hl) r.last = sp_String_cstr((sp_String *)r.hl);
+  return r;
+}
+static SP_NOINLINE SP_COLD sp_bool sp_srange_cover_handle_now(sp_StrRange r, void *h) {
+  r = sp_srange_ends_now(r);
+  return sp_srange_cover_handle(r.first, r.last, r.excl, h);
+}
 /* The object pointer a boxed value carries, for a slot that holds pointers
    rather than sp_RbVal (a PtrArray of one user class). nil is a NULL element,
    which is how that slot spells nil already. */

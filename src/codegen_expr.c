@@ -1468,6 +1468,27 @@ static int srange_var_read(const NodeTable *nt, int id) {
   return k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode || k == NK_GlobalVariableReadNode ||
          k == NK_ClassVariableReadNode || k == NK_ConstantReadNode || k == NK_ConstantPathNode;
 }
+/* --share-strings: does emit_expr read node id as a String Range's live
+   copy, made there from the Strings the Range keeps? */
+int srange_live_read(Compiler *c, int id) {
+  return repr_share_rule(c) && comp_ntype(c, id) == TY_STR_RANGE && srange_var_read(c->nt, id);
+}
+/* Does this operand hold no call: a local's, an instance variable's, a
+   class variable's or a constant's read as subtree_is_pure_read takes
+   them, self, or a parenthesis of one such? With lit, a plain String
+   literal too. A call, an index or a reader's among them, can run the
+   program's own code; these kinds run none. */
+int operand_holds_no_call(Compiler *c, int id, int lit) {
+  id = unwrap_parens(c, id);
+  if (id < 0) return 0;
+  switch (nt_kind(c->nt, id)) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_ClassVariableReadNode:
+    case NK_ConstantReadNode: case NK_SelfNode:
+      return subtree_is_pure_read(c, id);
+    case NK_StringNode: return lit;
+    default: return 0;
+  }
+}
 void emit_expr(Compiler *c, int id, Buf *b) {
   if (b == g_pre && g_pre) { emit_into_pre_line(c, emit_expr, id); return; }
   /* an argument of a call re-emitted as its builtin sees the reopenings */
@@ -1492,7 +1513,7 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   }
   /* --share-strings: a String Range a variable holds reads its endpoints'
      handles as they are now (#8321) */
-  else if (repr_share_rule(c) && comp_ntype(c, id) == TY_STR_RANGE && srange_var_read(c->nt, id)) {
+  else if (srange_live_read(c, id)) {
     buf_puts(b, "sp_srange_live(");
     emit_expr_node(c, id, b);
     buf_puts(b, ")");

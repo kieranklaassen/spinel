@@ -11435,8 +11435,44 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "; ");
         if (hold) { emit_gc_root_tmp_refs(c, rt, tr, b); buf_puts(b, " "); }
         buf_printf(b, "sp_RbVal _a%d = ", tr); emit_boxed(c, argv[0], b);
-        buf_printf(b, "; (sp_bool)(_a%d.tag == SP_TAG_STR &&"
-                      " %s(_t%d, _a%d.v.s)); })", tr, fn, tr, tr);
+        /* a boxed shared String handle is a String too: its text, asked
+           after the plain String. include? walks to it as it does to a
+           plain String; cover? compares it by its bytes, out of line
+           (sp_srange_cover_handle). The handle may be NULL, the box of a
+           nil stored among handles, which holds no String.
+           --share-strings: the temp is a copy of each end, made before the
+           argument and held by nothing while the argument's call
+           allocates. For the handle the ends are read again from the
+           Strings the Range keeps (sp_srange_ends_now), once the argument
+           is there. Where the copies are made as the call begins, by a
+           variable's live read (srange_live_read, emit_expr's own test)
+           or by a Range written there of two ends that hold no call, and
+           the argument holds no call either (operand_holds_no_call),
+           nothing runs between the two: the copies are the ends still
+           and are compared as they are. A call, an index or a reader's
+           too, can run the program's own code and change an end. A
+           Struct member's or a reader's Range hands on the copies it was
+           made with, and reads the ends again. */
+        if (g_strbuf_boxes == SB_BOXES_HANDLES && srange_member_builtin(c, name)) {
+          int rr = unwrap_parens(c, recv);
+          int made = nt_kind(c->nt, rr) == NK_RangeNode &&
+                     operand_holds_no_call(c, nt_ref(c->nt, rr, "left"), 1) &&
+                     operand_holds_no_call(c, nt_ref(c->nt, rr, "right"), 1);
+          int now = repr_share_rule(c) &&
+                    !((srange_live_read(c, rr) || made) && operand_holds_no_call(c, argv[0], 0));
+          buf_printf(b, "; (sp_bool)(_a%d.tag == SP_TAG_STR ? %s(_t%d, _a%d.v.s) : sp_poly_is_strbuf(_a%d) && ", tr, fn, tr, tr, tr);
+          if (is_membership_alias(name) && now)
+            buf_printf(b, "_a%d.v.p && %s(sp_srange_ends_now(_t%d), sp_String_cstr((sp_String *)_a%d.v.p))); })", tr, fn, tr, tr);
+          else if (is_membership_alias(name))
+            buf_printf(b, "_a%d.v.p && %s(_t%d, sp_String_cstr((sp_String *)_a%d.v.p))); })", tr, fn, tr, tr);
+          else if (now)
+            buf_printf(b, "sp_srange_cover_handle_now(_t%d, _a%d.v.p)); })", tr, tr);
+          else
+            buf_printf(b, "sp_srange_cover_handle(_t%d.first, _t%d.last, _t%d.excl, _a%d.v.p)); })", tr, tr, tr, tr);
+        }
+        else
+          buf_printf(b, "; (sp_bool)(_a%d.tag == SP_TAG_STR &&"
+                        " %s(_t%d, _a%d.v.s)); })", tr, fn, tr, tr);
         return 1;
       }
       buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); return 1;
