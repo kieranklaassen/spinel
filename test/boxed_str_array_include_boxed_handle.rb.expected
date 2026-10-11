@@ -1,0 +1,8 @@
+hash: true true
+array: true true
+beside: true
+integer: false
+nil: false
+longer: abz false true
+made by the call: 0
+nil beside a handle: false false true
