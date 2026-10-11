@@ -7376,6 +7376,36 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
   else if (pt == TY_STRING && emit_when_string_range(c, cond, t, b)) {
     /* emitted the lexicographic cover check */
   }
+  /* a boxed subject against a String Range is covered when it holds a
+     String, as the Range's own === answers a boxed argument
+     (srange_eqq_covers_boxed). Left to the equality below, it matched no
+     String, the plain one or the handle's. Any other subject keeps that
+     equality, and one test on the tag sends it there.
+     --share-strings: a variable's Range is read live, and one written in
+     the when with two ends that hold no call (operand_holds_no_call) is
+     made there with nothing run since, so their ends are compared as
+     they are. Any other Range hands on copies that may be stale: a
+     Struct member's or a reader's the ones it was made with, one written
+     there with a call in an end the first end as it was before that
+     call ran. There a String is covered by the ends read from the
+     Strings the Range keeps (sp_srange_cover_boxed_now). */
+  else if (pt == TY_POLY && comp_ntype(c, cond) == TY_STR_RANGE && srange_eqq_covers_boxed(c, cond)) {
+    int tr = ++g_tmp, cn = unwrap_parens(c, cond);
+    int made = nt_kind(c->nt, cn) == NK_RangeNode &&
+               operand_holds_no_call(c, nt_ref(c->nt, cn, "left"), 1) &&
+               operand_holds_no_call(c, nt_ref(c->nt, cn, "right"), 1);
+    int cur = srange_live_read(c, cn) || made;
+    buf_printf(b, "({ sp_StrRange _t%d = ", tr); emit_expr(c, cond, b);
+    buf_printf(b, "; ((1u << _t%d.tag) & (1u << SP_TAG_STR | 1u << SP_TAG_OBJ)) && (_t%d.tag == SP_TAG_STR || _t%d.cls_id == SP_BUILTIN_STRBUF) ? ",
+               t, t, t);
+    if (repr_share_rule(c) && !cur)
+      buf_printf(b, "sp_srange_cover_boxed_now(_t%d, _t%d)", tr, t);
+    else
+      buf_printf(b, "(_t%d.tag == SP_TAG_STR ? sp_srange_cover_bytes(_t%d.first, _t%d.last, _t%d.excl, _t%d.v.s)"
+                    " : sp_srange_cover_handle(_t%d.first, _t%d.last, _t%d.excl, _t%d.v.p))",
+                 t, tr, tr, tr, t, tr, tr, tr, t);
+    buf_printf(b, " : sp_poly_eq(_t%d, sp_box_srange(_t%d)); })", t, tr);
+  }
   /* a numeric Range never covers an Array or a Hash (nor a String):
      evaluate the arm for its effects and answer false */
   else if ((comp_ntype(c, cond) == TY_RANGE && (ty_is_array(pt) || ty_is_hash(pt))) ||
