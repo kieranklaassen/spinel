@@ -1,0 +1,676 @@
+# Row 264, piece one, one more head: the reader's delta against b581aa84b5ca
+
+Title, unchanged: "An attribute of an exception class with no initialize is
+kept once set". Texts v8. Parts 1 to 5 follow reader 8's five-item list
+("what the new head must answer"), item by item; then the texts (part 6),
+the round (part 7), the shapes measured and the one taken (part 8) and
+the finds (part 9).
+
+## Where it stands
+
+- Head af4439ccdb69b14a4f540487f89cd79339ac6c69, ONE commit on upstream master
+  0890056b9665a6243ddd63f60528a76ba27d9d14 (my own ls-remote of 21:17 UTC
+  10-10). Tree
+  0a987d6c2c8beee0814e8a5a54aae3605c6fed22, 23 files, 858 added, 46 removed,
+  unsigned, one trailer. "Depends on: none".
+- It supersedes b581aa84b5cac527448c1a82838957753ab9cd30 on 2e18e98a016d
+  (comments 6101843489, 6101870052, 6101922403). Reader 8's whole verdict
+  on that head: NOT READY on one count alone, gcc's 2 instructions a
+  turn where nothing is raised, in a method that holds a rescue typed to
+  a class of the piece with a class of the piece under it (124 to 126);
+  on every other point the code passes. The coordinator ruled the cut
+  (Y1 to Y6, 21:15 UTC 10-10) and then the verdict (X1 to X8, 21:54).
+  Nothing is rewritten: b581aa84b5ca stays.
+- Upstream's master moved 22 commits past that head's parent.
+  b581aa84b5ca merges with the tip of the cut at exit 0 (`git merge-tree
+  --write-tree`, tree 8d833f10face6592a5130a7f49cec38bd2f41a91); this
+  head is that tree with the delta of part 1, one commit on the tip.
+- The head adds no refusal to the default build for any String-sharing
+  route, adds none under --share-strings or any other flag, and lifts
+  none: the piece does not touch docs/limitations.md.
+- THE NEWER TIPS. Upstream's master moved three times while this round
+  ran, by my ls-remote: 4412e698feb4 at 22:49 UTC 10-10, ad681d651800
+  at 23:16 and 2baeadf39713ab8f713018ef54c836bbd7a1b321
+  at 23:27 (the same at 23:40), 37 commits (21 that are no merge)
+  past this head's parent. By the rule for a moved tip the head STANDS,
+  on each of the three. (i) `git merge-tree --write-tree` of each tip
+  with af4439ccdb69: exit 0; the trees are c1ac2e7bd5bc, 35ba0a654eec
+  and 19740812d3c70423f6ee393a24c98643cf9440e5.
+  (ii) Each merged tree, BUILT: the six tests 72 of 72, the overflow
+  modes 12 of 12 right, the Before programs and the crash programs 12
+  of 12 each, the eleven proof programs, the five parent-arm programs
+  of part 4, the twenty-six inner-ensure programs of part 5 and the ten
+  quiet shapes of part 2 for their lines, 12 of 12 each: the head's
+  answers, cell for cell; the gate's staged check exit 0;
+  codegen_program 977 lines. Each BARE newer tip, built too, answers
+  every one of them as bare 0890056b9665 does, cell for cell (18 of 72,
+  6 of 12; of the proof programs the pair of an unboxed class 12, its
+  String twin 4, the bare raise in an ensure 0, 4 and 0, the rest 0; of
+  the parent-arm programs the Integer one 12 and the rest 0; of the
+  inner-ensure programs the two of four and five attributes 12 and the
+  rest 0): the whole piece remains on it. (iii) Functions of the piece
+  the moves touched: NONE. The moves' hunks under src/ are in
+  src/analyze.c, src/analyze_desugar.c, src/builtin_names.c,
+  src/builtin_ops.c, src/codegen_call_method.c, src/codegen_call_recv.c
+  and src/codegen_fold.c, which the piece does not edit; in
+  src/codegen_call.c, in method_scope_arity and a new function beside
+  the arity table (the piece's are emit_exc_sub_new_arm and
+  emit_exc_new_no_init); and in
+  src/codegen_iter.c, in iter_range_upto_arms and
+  emit_iteration_stmt_body (the piece's is emit_array_filter_loop, 176
+  lines on every tip). Under lib/ they are in sp_alloc, sp_cold, sp_gc,
+  sp_range.h and five places of spinel_rt.h (a new sp_int_loop_next
+  among them); lib/sp_exc.c and lib/sp_exc.h are unchanged in the range
+  and the wrap macros are not in it; the overflow lane is run on each
+  merge all the same. The direct callers of the four builders are the
+  same 17 lines on the newest bare tip: no new site. Upstream's own two
+  refusals of the first move (test/reject/string_hash_*.rb) are not the
+  piece's: the corpus compare of part 4 is against the tip of the cut,
+  and the piece adds none on any tip. No paragraph of the texts goes
+  stale: the Before programs answer the same. `make share-check-test`
+  fails on each bare newer tip and on each merge as it fails on the tip
+  of the cut, in the same lines (part 7).
+
+## 1. One commit; lib and the entries; the code delta (item 1; Y1, Y5)
+
+ONE commit. lib/sp_exc.c and lib/sp_exc.h are b581aa84b5ca's blobs byte
+for byte (d29aef43f8d4, d0d37d42a7d9), and so are the three entries, the
+table, the raise's row and the maker's rows; `.new` keeps master's
+literal in its three emitters, as on b581aa84b5ca. The second block is
+`git diff 8d833f10face 0a987d6c2c8b`, WHOLE: the merge of b581aa84b5ca
+with the tip of the cut against this head's tree, two files, 21 lines
+added and 7 removed. The third block is the two patches' added and
+removed lines, compared; the fourth `git range-diff` of the two commits.
+
+1. THE ARM (Y1), in emit_rescue (src/codegen_stmt.c), where a class of
+   the piece descends from the arm's class. The compare and the arm's
+   own call stay in line; the table and what follows it are in one
+   function of the generated code, out of line and cold. Emitted, for
+   `rescue Error => e` with ParseError under Error, the scan argument
+   where the class has a slot to mark:
+
+   ```
+   before: ({ void *_u = _rcls_3 == &sp_xbn_name[0][1] ? NULL
+                  : sp_exc_own_by_name(_rcls_3, _rmsg_3, 0);
+              _u ? _u : sp_exc_new_sub_ivars(sizeof(sp_Error), _rcls_3,
+                                             _rmsg_3, sp_Error__gc_scan); })
+   now:    (_rcls_3 == &sp_xbn_name[0][1]
+              ? sp_exc_new_sub_ivars(sizeof(sp_Error), _rcls_3, _rmsg_3,
+                                     sp_Error__gc_scan)
+              : sp_exc_arm_other(_rcls_3, _rmsg_3, sizeof(sp_Error),
+                                 sp_Error__gc_scan))
+   ```
+
+   and, for a class whose ivars are all unboxed, master's own call
+   after the compare and the base scan handed to the function:
+
+   ```
+   now:    (_rcls_20 == &sp_xbn_name[0][1]
+              ? sp_exc_new_sub_sized(sizeof(sp_Error), _rcls_20, _rmsg_20)
+              : sp_exc_arm_other(_rcls_20, _rmsg_20, sizeof(sp_Error),
+                                 sp_exc_gc_scan))
+   ```
+
+   The function, emitted once, by emit_user_exc_dispatch beside the
+   entries' makers, and declared with them in emit_exc_by_name_table:
+
+   ```
+   SP_UNUSED static SP_NOINLINE SP_COLD void *sp_exc_arm_other(
+       const char *cls, const char *msg, size_t sz, void (*scan)(void *)){
+     return sp_exc_own_row(cls) ? sp_exc_own_by_name(cls, msg, 0)
+                                : sp_exc_new_sub_ivars(sz, cls, msg, scan);
+   }
+   ```
+
+   A row goes to the maker, which builds the subclass as itself; a name
+   that is no row (a copy, `raise x.class, "m"`) is built by
+   sp_exc_new_sub_ivars with the arm's size and scan, which is what the
+   arm's own call does (sp_exc_new_sub_sized is sp_exc_new_sub_ivars
+   with the base scan: both are one line over sp_exc_sub_build in
+   lib/sp_exc.c). Both ways out of the function are tail calls, so it
+   holds nothing across a call and has no frame.
+   WHY IT CUTS THE 2: in the old statement the name and the message are
+   live across the table's call (the fallback takes them again), so gcc
+   keeps them in a callee-saved register and saves one more register on
+   entry to the function around the arm, on every call of it. Now each
+   way out of the arm's statement is one call and nothing is kept
+   across it. By the disassembly of the reader's smallest program (a
+   method `step` with the rescue, nothing raised): `sp_step` pushes two
+   registers on the bare tip, three with b581aa84b5ca's arm, two on
+   this head.
+   ONE FUNCTION, NOT ONE FOR EACH CLASS (X1 left it to me): the size
+   and the scan are arguments, so the generated C grows by two lines
+   for any number of classes, and the call passes four arguments where
+   the arm's own passes three or four. Compile time, measured again
+   (part 6, T5): 16,520 to 19,646 instructions a class; the function's
+   text costs the compiler about 14,000 instructions once in a program
+   that has such a class (one such class: 118,511 of the compiler's own
+   against 104,474 with the arm in line, part 8).
+   emit_rescue is 367 lines (342 on the bare tip, 359 on the superseded
+   head); emit_user_exc_dispatch 159 (105; 154); emit_exc_by_name_table
+   21 (new with the piece; 20).
+
+2. THE ONE-LINE EDITS (Y5: said, not silent). In src/codegen.c: the
+   function's declaration, one added line of the table's preamble; and
+   T3's two comment lines, which lose "or builds" (part 6). In
+   src/codegen_stmt.c: the arm's `buf_printf`, one line for two; the
+   closing `buf_puts`, six lines for one; the comment over them. A
+   comment-only edit leaves the compiler as it was: with the two
+   comment lines alone changed, codegen.o and the built spinel are
+   byte for byte the same.
+
+3. Nothing else. The diff names two files, src/codegen.c and
+   src/codegen_stmt.c; the six tests and their .expected files are
+   b581aa84b5ca's byte for byte.
+
+## 2. Nothing raised (item 2; Y1, Y3)
+
+Instructions a turn, a loop of 150,000 turns less one of 50,000, the
+program's C by gcc 13 and by clang 18, the change against bare
+0890056b9665. "Before" is b581aa84b5ca's arm on this tip (the merge of
+part 1, built), "now" this head. TEN QUIET SHAPES, mine after the
+reader's list (its own ten are with the reader), a rescue typed to PErr
+with QErr under it and nothing raised: one Integer attribute; two; with
+an ensure; in a method (t4, my writing of the reader's smallest
+program); a second arm ahead; in a `while`; with an `else`; an Array
+read in the body; a String attribute; three levels:
+
+```
+          bare gcc  before  now    bare clang  before  now
+t1           88.00   +0.00  +0.00       76.00   +1.00  +0.00
+t2           88.00   +0.00  +0.00       76.00   +1.00  +0.00
+t3          113.00   +0.00  +0.00      106.00   +1.00  +1.00
+t4 (method) 124.00   +2.00  +0.00      119.00   +0.00  +0.00
+t5           87.00   +0.00  +0.00       75.00   -1.00  +0.00
+t6           90.00   +0.00  +0.00       75.00   +1.00  +0.00
+t7           92.00   +0.00  +0.00       80.00   +1.00  +0.00
+t8          112.50   +0.00  +0.00      109.00   +1.00  +0.00
+t9           88.00   +0.00  +0.00       76.00   +0.00  +0.00
+t10          88.00   +0.00  +0.00       76.00   +1.00  +0.00
+```
+
+With gcc: 0.00 in ten of ten; the method one is 124 to 124. TEN MORE OF
+MINE, each with the rescue inside a method (a `begin` with an ensure;
+the method's own rescue; with its own ensure; a second arm ahead; an
+`else`; storing nothing; a String attribute; an instance method on an
+ivar; two `begin`s typed to the parent and the subclass; two arms of
+three levels):
+
+```
+          bare gcc  before  now    bare clang  before  now
+g1          158.00   +0.00  +0.00      147.00   +0.00  +1.00
+g2          124.00   +2.00  +0.00      119.00   +0.00  +0.00
+g3          143.00   +0.00  +0.00      144.00   +0.00  +0.00
+g4          126.00   +0.00  +0.00      119.00   +0.00  +0.00
+g5          130.00   +2.00  +0.00      125.00   +0.00  +0.00
+g6          124.00   +2.00  +0.00      119.00   +0.00  +0.00
+g7          132.00   +0.00  +0.00      119.00   +0.00  +0.00
+g8          125.00   +2.00  +0.00      119.00   +0.00  +0.00
+g9          209.00   +0.00  +0.00      195.00   +0.00  +0.00
+g10         126.00   +0.00  +0.00      119.00   +0.00  +0.00
+```
+
+With gcc: 0.00 in ten of ten, where the old arm cost 2 in four. (In g9
+and g10 `e` is bound at two arms of different classes and the C does
+not type either arm, so neither statement holds the compare.) THE OTHER
+QUIET PROGRAMS, the thirty-two of the last delta (an ensure, a rescue,
+an `else` under an ensure, a `synchronize` body, a filter block;
+thirty with a class of the piece): 0.00 with gcc in thirty-two of
+thirty-two. So of fifty-two quiet programs fifty have such a class,
+twenty-three of them at a rescue typed to a class with such a class
+under it, eleven of those inside a method, and NONE costs more with
+gcc: the texts' sentence, true of the reader's smallest program and of
+its ten shapes on this head (Y4).
+
+CLANG, STATED AS LAYOUT (Y3). On this head five of the fifty cost more
+and none less: t3 106 to 107, g1 147 to 148, and of the thirty-two rC
+98 to 100 (a rescue typed to the class and an ensure, the class with no
+subclass: no compare in its arm), rF 98 to 100 (the same with a
+subclass) and rI 76 to 77 (a rescue typed to the parent, the program
+storing nothing). Every one is at an arm that is never taken, whose
+statement is not reached. THE SIGN IS NOT THE ARM'S: with the old arm
+the same ten shapes are +1 in seven and -1 in one (t5), and g1 is 0;
+with this arm t5 is 0, the seven are 0 but t3, and g1 is +1; rF is 0
+with the compare and the table in line (part 8, shape F) and +2 here;
+uI, the 76 to 77 of the last delta, is 76 to 76 here. Which program
+moves, and which way, turns on the form of a statement that does not
+run. The texts state the five with their counts and say that clang lays
+out the function around such an arm differently; the cause clause of v7
+(one `lea` clang no longer hoists) is gone with the program it was
+read from. MY OWN FIGURES ON THIS HEAD HAVE ONE SIGN, PLUS; the minus
+is the old arm's and shape F's, and I do not write "fewer" into the
+texts for a head that shows none.
+
+## 3. Where something is raised (item 3; Y2)
+
+The change's own (the change less glibc's string compares) for one
+exception built, the same measure, against bare 0890056b9665; "before"
+is b581aa84b5ca's arm on this tip. THE PARENT ITSELF, raised by name
+and caught by its own arm, a subclass of the piece under it:
+
+```
+                                        gcc before  now  clang before  now
+ALL UNBOXED (the compare alone)
+the parent holds two Integers alone          +3.00 +2.98        -1.00 -0.01
+reader 8's ten-line program (par_bare)       +2.99 +3.01        +2.99 -1.00
+the same, the rescue inside a method (pu3)   +5.01 +2.99        +2.98 +2.98
+the same, with an ensure (pu4)               +3.02 +2.99        +2.99 +1.99
+the same, three levels (pu5)                 +3.01 +2.99        +1.00 +4.02
+A SLOT TO MARK (the compare and the scan argument)
+the subclass has no attribute of its own     +7.01 +9.01        +7.01 +6.01
+the parent holds a String                    +7.00 +7.16        +7.03 +6.03
+the program stores nothing (slots boxed)     +7.00 +9.01        +7.04 +6.02
+```
+
+The unboxed parent pays the compare, 3 with gcc in five of five (the
+old arm's 5 inside a method is gone with the register) and from 1
+fewer to 4 more with clang. The parent with a slot to mark pays the
+compare and the scan argument, the 4 an arm with no such subclass
+passes for such a class: 7 to 9 with gcc, where it was 7, and 6 with
+clang, where it was 7. STATED with both compilers in the message
+("7 to 9 and 6 in three programs"; "3 with gcc and from 1 fewer to 4
+more with clang in five programs") and in the body's sentence, to the
+hundredth. glibc's share in the last line's program is -86.00 and
+-44.00, as before, for the same calls.
+
+A SUBCLASS THROUGH THAT ARM, raised by name, the change's own:
+
+```
+                                        gcc before  now  clang before  now
+the parent holds two Integers alone         +21.55 +25.55       +16.55 +18.54
+reader 8's shape (sub_int)                  +21.54 +21.55       +18.56 +22.54
+the subclass has no attribute of its own    +17.01 +20.00       +18.02 +19.01
+the parent holds a String                   +33.60 +30.60       +27.04 +29.03
+the program stores nothing (slots boxed)    +29.82 +32.82       +31.22 +31.23
+```
+
+The road through the function is from 3 cheaper to 4 dearer with gcc
+and from 0 to 4 dearer with clang than through the old arm: one more
+call, to a function that tail-calls. It falls on the piece's own class
+(where the subclass stores what it adds, the bare tip writes past the
+parent's size) and is STATED with both compilers: the body's fourth
+row (+66.07 and +33.48, of them 32.82 and 31.23 the change's own) and
+its sentence, which gives the five programs' range, 20.00 to 32.82 and
+18.54 to 31.23; the message's "33 and 31".
+
+## 4. The answers (item 4)
+
+- The six tests: 72 cells of 72 on the head, 18 of 72 on the bare tip
+  (builtin_reopened 12, ensure_clause 0, marked 4, parent_arm 0,
+  without_initialize 0, share_strings 2). Both overflow modes, the six
+  tests built with clang at -O0 under --int-overflow=wrap and =promote:
+  12 of 12 right on the head, 6 of 12 on the bare tip. No test of the
+  piece is on a skip list.
+- A CLASS THAT NEEDS THE SCAN AND ONE OF INTEGERS ONLY THROUGH THE SAME
+  ARM, the parent and the subclass raised by name in turn through the
+  parent's arm (which stores the parent's attribute and raises again),
+  the subclass's own arm storing what the subclass adds, all read back
+  after 3,000 allocations; five programs, twelve cells each (gcc and
+  clang, with and without --share-strings, SPINEL_GC_STRESS 0, 1, 2):
+  a String and an Array on both sides (ps1): head 12 of 12, bare tip 0;
+  Integers alone, the parent also raised with no message, as an object
+  built by `.new`, and by a class read off a value, which is no row
+  and takes the function's second way (ps2): head 12 of 12, bare tip
+  12, and it stays right; three levels, the message a String the
+  program appends to (ps3): head 12 of 12, bare tip 0; the parent
+  Integers alone, the subclass a String and an Array (ps4): head 12 of
+  12, bare tip 0; the parent a String, the subclass Integers alone
+  (ps5): head 12 of 12, bare tip 0. The kept test for the parent's arm
+  (test/exception_attribute_parent_arm.rb) is 12 of 12. The ten quiet
+  shapes of part 2, run for their lines at 150,000 turns: 12 of 12
+  each, on the head and on the bare tip.
+- Corpus by C against the bare tip: 6,904 identical, 12 differ, 0 refusal changes; with
+  CIDENT_FLAGS=--share-strings 6,902 identical, the same 12 differ, 0
+  refusal changes, 2 refused by both alike. THE TWELVE, the same as
+  on b581aa84b5ca, none new: the piece's five tests (ensure_clause,
+  marked, parent_arm, without_initialize,
+  share_strings_exception_attribute) and
+  builtin_ivar_boxed_reflection, class_value_new_exception_subclass,
+  exception_bare_new_in_class_method,
+  exception_message_super_private_def, exception_object_surface,
+  ivar_set_poly_builtin_reopen, systemcallerror_message_from_errno.
+- NO REFUSAL: the corpus compare counts 0 refusal changes with the
+  flag and without; tools/refusals.sh passes (656 records) and
+  reject-test passes; defer-refusals-test passes. The head adds no
+  refusal to the default build and none under a flag.
+
+## 5. The tip, the names, the crash section (item 5; Y5)
+
+- THE TIP OF THE CUT. 0890056b9665 by my ls-remote of 21:17 UTC 10-10,
+  22 commits (11 that are no merge) past 2e18e98a016d. The move touched
+  ONE function the piece edits, emit_call_new_arms (568 lines to 573 on
+  the bare tips, 569 to 574 with the piece), by upstream's "A fresh rest
+  array and block proc are rooted until the callee holds them": the
+  boxed arguments of `.new` on a poly receiver are rooted. The piece's
+  lines there are the builder's name in the statement of an exception
+  class's `.new`; no builder call changes. Also the file scope of
+  src/codegen_internal.h (declarations on both sides).
+  lib/sp_exc.c, lib/sp_exc.h and lib/spinel_rt.h are unchanged in the
+  range: the wrap macros are not in this move, and the overflow lane is
+  run all the same (part 4). The direct callers of sp_exc_caught_obj,
+  sp_exc_ensure_obj, sp_exc_new_for_catch and sp_exc_new_sub_sized
+  under src/ are the same 17 lines on bare 2e18e98a016d and on bare
+  0890056b9665: no new site.
+- THE FUNCTION-LIMIT NAMES, bare 0890056b9665 and then the head, by the
+  gate's own count: codegen_program 976 and 977 (the limit 1,000);
+  emit_begin 399 and 399; emit_rescue 342 and 367;
+  emit_user_exc_dispatch 105 and 159; emit_call_raise_arms 385 and 393;
+  emit_ensure_else 24 and 24; emit_call_synchronize_arms 196 and 196;
+  emit_array_filter_loop 176 and 176; emit_call_new_arms 573 and 574.
+  `ruby tools/gate.rb check-range 0890056b9665 af4439ccdb69` EXITS 0
+  (part 7).
+- THE CRASH SECTION. The inner-ensure section, the last of
+  test/exception_attribute_ensure_clause.rb, is b581aa84b5ca's byte for
+  byte: alone it is signal 11 on the bare tip of the cut in 12 cells of
+  12; in the test it is right on the head in 12 of 12 and under both
+  overflow modes. The twenty-six inner-ensure programs of the last
+  delta (three single forms, their four- to twelve-attribute variants
+  and twenty looped forms): 12 of 12 each on the head; on the bare tip
+  two of them are right (four and five attributes in the first form)
+  and twenty-four are not. The body's Before sentence stands as it
+  was.
+- THE TEXTS, T1 to T3, T6 and T7: part 6.
+
+## 6. The texts, v8 against v7 (X2 to X7)
+
+The fourth block of the first comment is every changed line, as `diff`
+prints it.
+
+- T1 (X2), the quiet sentence, measured again. "of fifty-two programs
+  ..., fifty have such a class, twenty-three of them at a rescue typed
+  to a class that another such class descends from, eleven of those
+  inside a method, and none of the fifty costs more with gcc. With
+  clang forty-five cost the same and five cost 1 or 2 more (106 to 107,
+  147 to 148, 98 to 100 twice, 76 to 77), each at a rescue arm typed to
+  such a class that is never taken: the arm's statement is not reached,
+  and clang lays out the function around it differently." The cause
+  clause is gone. The phrase "both of Integer attributes alone" is gone
+  with the sentence that held it: it meant uC and uI, the two programs
+  whose class holds two Integers (part 2 names every program that
+  moves).
+- T2 (X3), the parent's figures, as ranges across the programs of each
+  shape, with both compilers: message "7 to 9 and 6 in three programs"
+  and "3 with gcc and from 1 fewer to 4 more with clang in five
+  programs"; body "9.01 with gcc and 6.02 with clang ... (in three
+  programs of that shape, 7.16 to 9.01 and 6.01 to 6.03)" and "in five
+  programs of that shape 2.98 to 3.01 with gcc and -1.00 to 4.02 with
+  clang". The subclass's figure is the fourth row's program's, named as
+  that, with the five programs' range beside it in the body.
+- T3 (X4), in src/codegen.c: "passes a class's row wherever it raises
+  the class" and "raises it as `name`"; "or builds" is gone from both
+  comments. It rides this commit.
+- THE ARM'S SENTENCE (Y1), message and body: "An arm whose class has
+  such a class under it compares the raised name with its own row first
+  and builds its own class by the call it had; any other name goes to
+  one function of the generated code, out of line and cold
+  (sp_exc_arm_other), which hands a row to the table and builds a name
+  that is no row as the arm would. Either way is one call with nothing
+  kept across it. With the table's call in line the name and the
+  message live across it, and gcc saves one more register in the
+  function around the arm: 2 instructions on every call of a method
+  that holds such a rescue, raised or not." It says why the function is
+  there, in the present; no line of the texts tells how it was found.
+- T4 (X5): stands. T5 (X5): no fix. My figure at 300 classes is 1.2883%
+  on this head, 1.3 as the texts say (0.5470% at 1,000 and 0.3304% at
+  2,000; 5,893,893, 16,519,664 and 34,247,445 instructions).
+- T6 (X6): EVERY FIGURE THE TEXTS KEEP IS MEASURED ON THIS HEAD, against
+  the bare tip of the cut, and the body tells no history of the
+  measuring. What moved against v7 (the fourth block of the first
+  comment has every line):
+  MOVED BY THE ARM: the fourth row with gcc, +63.06 to +66.07, its own
+  share 29.81 to 32.82 (with clang the row and its share are what they
+  were, +33.48 and 31.23), and the message's "33 and 31" for "30 and
+  31"; the parent itself (T2); the quiet sentence (T1).
+  MOVED BY THE TIP, by 0.11 or less, in programs whose arms this delta
+  does not touch; master's own count moves with them (2402.72 to
+  2402.79 in the first row), and the first cut of this round, built on
+  the same tip with another arm (part 8), measures each of them as this
+  head does to 0.02. The first row (+6.04 and +5.00 to +5.93 and
+  +4.99); the second and third with gcc (+70.09 to +70.03, +57.01 to
+  +56.95; their own share 4.09 and 4.01 to 4.03 and 3.95); the fifth,
+  seventh, eighth and ninth by 0.04 or less; the class of Integer ivars
+  (0.00 and 0.00 with gcc, 0.00 and -0.01 with clang, to 0.00 and 0.01,
+  0.01 and 0.00).
+  DID NOT MOVE, measured again: the sixth row; the second, third,
+  fourth, fifth and ninth with clang; glibc's 66.00, 53.00 and 33.25
+  with gcc and 0.00, -51.00 and 2.25 with clang, and -86.00 and -44.00;
+  the message's 6 and 5, 8 and 5, 17 and 20, 4 and 4, 0 and 0, 146 and
+  215, 66 and 53; 15,900,423 to 19,800,423 calls of strcmp with gcc,
+  the same on both sides; 292 and 1,148 instructions for a class asked
+  once and "to within 340 instructions" (-340 of the compiler's own for a program with no class of its own;
+  87,684 for 300 classes that are no exception; 344,518 for 300
+  exception classes with an initialize); 16,500 to 19,600 a
+  class and 1.3%, 0.5% and 0.3% (T5); "30 of 30", 29 of 30, 39 of 40
+  twice and 59 of 60, by the tests' own lines on the bare tip of the
+  cut.
+- T7 (X7), MASTER'S OWN FAULT, REACHED AND NOT MADE. On the bare tip of
+  the cut the cause of an exception OBJECT raised under a rescue and
+  leaving through an ensure reads nil, where CRuby reads the rescued
+  exception: for a builtin object (`raise TypeError.new("t")`: nil on
+  the bare tip and on the head) and for a class of the piece built by
+  `.new` (nil on the head, with the attributes it set; the bare tip
+  crashes or prints wrong lines ahead of that read by where its stores
+  land). Raised by name, the cause prints on both. One "Not here"
+  paragraph in the message and the body says it: "Nor the cause of an
+  exception object raised under a rescue and leaving through an ensure
+  (`raise Tagged.new("t")` there): `e.cause` is nil before this change
+  and after it, for a builtin exception object too, where CRuby reads
+  the rescued exception. A program that crashed ahead of that read
+  reaches it."
+- The body carries the same sentences in the body's words ("on master
+  and with this change").
+- ONE SENTENCE BEYOND THE LIST, in the body's checks paragraph:
+  "`share-check-test` fails there as it fails on master too, in the
+  same ten lines (`test/share_check/send_arms.rb`: its recorded report
+  counts 160 marks, the run 159), for a program whose C is the same
+  with and without this change." The leg passed on the last head's tip
+  and fails on this one's, bare (part 7); the paragraph lists what was
+  run, so it says so.
+- Nothing else changes: the Before programs, the table's heading, the
+  checkboxes and the test list are v7's.
+
+## 7. The round on this head
+
+Both sides built with the rbs parser, bare 0890056b9665 and the head.
+WHOLE, on the head's final tree (0a987d6c2c8b). A first cut of this
+round with the compare and the table in line (part 8, shape F; not
+handed over) had the same round run to its long legs; where "both" is
+said below the two were compared.
+
+- The six tests, twelve cells each: bare tip 18 of 72, head 72 of 72.
+  The piece's step, nine programs in twelve cells: 104 pass, and the 4
+  that fail are thread_anon_class_display_text at stress 2, which
+  aborts on the bare tip in the same four cells. The body's Before
+  programs on the head: CRuby's lines in 12 cells of 12 each.
+- Overflow modes: part 4 (12 of 12 right on the head, 6 of 12 on the
+  bare tip).
+- `ruby tools/gate.rb check-range 0890056b9665 af4439ccdb69`, the tip's
+  own tool over the one commit: EXIT 0. It warns "no Ruby 4.0 or later
+  (set GATE_RUBY); .expected not checked against CRuby", so here it
+  judged the function sizes, the fixed /tmp paths and that each added
+  test has its .expected, and did not run a CRuby. By my own run CRuby
+  3.3.6 with --enable-frozen-string-literal prints all six .expected
+  files. That comparison under CRuby 4.0 is a named check for the gate
+  of record. `tools/gate.rb check` with the commit staged: exit 0, with
+  the same warning.
+- Corpus by C against the tip: part 4. tools/refusals.sh passes (656
+  records); reject-test passes.
+- The corpus lane at -O1 for those twelve and the sixth test: 13 PASS,
+  and 13 PASS with SPINEL_SHARE_STRINGS=1.
+- optcarrot's C: identical on both. The split build of the kept test
+  (--jobs=3, SPINEL_SPLIT_STRICT=1): builds and passes. The crash
+  programs (the wide program, my four-attribute one and the wide one
+  with a cause through a method's ensure): right on the head in 12
+  cells of 12 each.
+- THREADED, not in the texts: four programs that make and join a
+  Thread and then run a row's loop, against the bare tip, the threaded
+  runtime built by gcc 13, the program's C by gcc and then by clang, on
+  this head. A builtin caught by an arm in a program with no such
+  class: -0.97 and -1.03; the same with such a class defined (row one):
+  +5.64 and +5.27; a class with an initialize of its own: -0.01 and
+  -0.22; the class raised by name and caught by its own arm (row two):
+  glibc's string compares +33.01 and +98.99, the change's own +4.13 and
+  +5.18. They are the last delta's figures to within its run-to-run
+  spread.
+- Probe sets, each program on CRuby, the bare tip and the head in six
+  cells: the hooks' 18 programs (lost 0, cured 6, moved 30, exit status
+  differs in 6 cells); the body's 4 (lost 0, cured 17, exit status
+  differs in 8); the 92 roads (lost 0, moved 24, the four that print an
+  address); 13 more (lost 0, cured 22, exit status differs in 4); the
+  decline's 51 twins (lost 0, cured 0, moved 0); the frozen literal's 6
+  (lost 0); reader 8's first 3 (lost 0, cured 4). 187 programs, 1,122
+  cells, lost 0: the last round's counts, each one, and on both cuts of
+  this round the same line for every program but the four addresses.
+  The five pairs of an unset read reached: 54 wrong lines on the head,
+  54 the twin's line on the bare tip. The read past the end on the bare
+  tip: 0 of 230,400 lines equal CRuby's, in 960 runs.
+- The neighbour's and the reader's programs, the modifier's and the
+  --rbs ones (11): lost 0, cured 1,696. The list (20): cured 152; its
+  2 lost lines are l3b's, as on every head before (CRuby's count of 30
+  there counts a cause; the bare tip prints 30 at stress 2 by the
+  attributes it loses and 0 at stress 0, the head 0 in all six). The
+  presence examples (2) and the presence reads (91): the same lines on
+  both sides. The presence twin: 136 of 140, as before. f1, f2 and f3
+  are wrong on the bare tip (19 of 20 in 6 of 6 cells) and 0 on the
+  head.
+- The ensure's road: 15 programs (n1 to n3, e4, e7, a1 to a4, g1 to g3,
+  o1 to o3), lost 0, cured 53 (52 to 54 by the run: o2, which the bare
+  tip ends by signal 11, prints 12 to 14 wrong lines first). The inner
+  ensure: part 5. The eleven proof programs (the pair for each kind of
+  class, the four sites, the three subclass roads, the two else roads,
+  the bare raise in an ensure): 12 cells of 12 each on the head; on the
+  bare tip the pair of an unboxed class alone is right in 12.
+- A class of the piece with no message given, run again on this head:
+  the pair's lines in 12 cells of 12 and under both overflow modes with
+  and without --share-strings, 16 of 16 on each side.
+- THE STRING RANGE CELL, run again on this head, three programs: with
+  --share-strings at SPINEL_GC_STRESS=2, gcc and clang, each prints
+  wrong lines at exit 0 on the head (10 cells of 12 right), where the
+  bare tip is right in 10 of 12 in two of them and ends by signal 11 in
+  the piece's own (4 of 12). REACHED, NOT MADE, as before; the body's
+  sentence stands.
+- The five `.new` programs of the last delta (W4): four are right on
+  the head in 12 cells of 12. The threaded one, at SPINEL_GC_STRESS=2,
+  twelve runs with each compiler on an idle machine: the bare tip is
+  never right (wrong lines in 22 runs of 24, an abort in 2), the head
+  is right in 21 and aborts in 3; on a loaded machine the head aborts
+  in 12 of 24 and the bare tip in 4, wrong in the other 20. Its C has
+  no arm with a subclass (the new function is never called there), so
+  the abort is not the arm's: it is the side find of the last delta
+  (part 9), and at levels 0 and 1 both sides are right.
+- Compile time, the compiler's totals by a second run: one such class +4.19%, 300 +1.29%, 1,000 +0.55%, 2,000 +0.33%;
+  optcarrot -0.002% with the same C.
+- The legs, in the head's tree: int-min-test, defer-refusals-test,
+  share-strings-test, gc-stress-test, shadow-check (900 programs) and
+  inline-rbs-test pass. share-verify-test exits 2 (1,182 programs, 2
+  new diagnostics, 8 stale entries, 1 failure), AS THE BARE TIP DOES IN
+  THIS CONTAINER: the tool run in the bare tree on the five programs it
+  names prints the same words. The failure is
+  test/share/share_strings_net_http_zlib.rb ("generated C differs with
+  the flags"); the two new diagnostics are of
+  test/share/share_strings_exception_dispatch.rb; the stale entries are
+  of three programs upstream has since cured. Neither of the first two
+  holds a class of the piece: both emit the bare tip's C, with
+  --share-strings and without. share-check-test exits 2 ON THE BARE TIP
+  AND ON THE HEAD ALIKE, in the same ten lines
+  (test/share_check/send_arms.rb: the recorded report says 160 marks,
+  the run 159); the program emits the same C on both. It is the leg the
+  last delta found failing on the then newer tip; that failure is in
+  the tip of this cut. The body's checks paragraph says so in one
+  sentence, new in v8.
+- The mail (the third comment): `git am` on 0890056b9665, with the
+  mail's date as the committer date and committer Claude, gives the id,
+  and check-range over that applied commit exits 0. It is made with
+  `git format-patch --no-stat`, 63,582 bytes: with the stat it is
+  65,763, past what one comment holds. The stat is in "Where it
+  stands".
+
+## 8. The shapes measured, and the one taken (Y1, Y2)
+
+Five forms of the arm's statement, each built on the tip of the cut and
+measured against the bare tip, the change's own, gcc and then clang.
+"h" is b581aa84b5ca's (the table in line, then the fallback). "D" is
+the reader's: the compare and the arm's own call in line, and a cold
+function that asks the table and then falls back. "this head" is D
+with the function's two ways as tail calls. "E" is the three ways in
+line (`own row ? own call : sp_exc_own_row ? table : own call`). "F"
+is two ways in line with no new function (`own row || no row ? own
+call : table`).
+
+```
+                                   h          D     this head      E          F
+gcc, quiet: t1 to t10          2 in one       0         0          0          0
+gcc, quiet: g1 to g10          2 in four      0         0      not run        0
+clang, quiet: the twenty      +1 in 7, -1    +1 in 2   +1 in 2  not whole  +1 in 2, -1
+the unboxed parent, gcc       3.00, 2.99   2.98, 3.01 2.98, 3.01 2.99, 3.00 3.01, 3.00
+  in a method (pu3), gcc         5.01         3.02      2.99       8.02       5.98
+the unboxed parent, clang    -1.00, 2.99   0.00,-1.00 -0.01,-1.00 0.00, 0.00 2.00, 2.00
+the boxed parent, gcc            7.00         9.00      9.01       9.00       6.99
+the boxed parent, clang          7.04         6.03      6.02       7.03       7.02
+the subclass road, gcc          29.82        43.82     32.82      29.81      27.82
+the subclass road, clang        31.22        43.23     31.23      28.23      28.23
+```
+
+(The parent and subclass lines are the programs that store nothing;
+parts 2 and 3 have every program for h and for this head.)
+
+Y2 asked for a shape that holds D's zeros with gcc in all ten quiet
+shapes and pays less where something is raised. THIS HEAD'S IS ONE: it
+is D to the letter of Y1 (the compare and the arm's own call in line,
+the table and what follows it in a cold function out of line), it
+holds D's zeros in the ten shapes and in my ten more, and it pays 11
+and 12 less than D on the subclass road, by the tail calls: D's
+function keeps a frame to test what the table returned. On the parent
+itself it pays what D pays. E AND F PAY LESS ON SOME ROADS AND MORE ON
+OTHERS, and I did not take them: F is up to 5 cheaper on the subclass
+road (3 or 4 with clang; 1 dearer in one program of five with gcc) and
+up to 2 cheaper with gcc on the boxed parent, but 3 dearer with gcc on
+the unboxed parent inside a method (5.98 for 2.99) and 1 to 3 dearer
+with clang on four of the five unboxed parents, and 1 dearer with clang
+on the boxed one: programs master ran right. E is 8.02 inside the
+method. F was built whole as a head and its round run
+before I measured the method (its quiet programs are in part 2's notes
+on clang); it is not handed over.
+
+- A function for each class: not built. One function serves, by two
+  more arguments on a cold call (part 1).
+- The maker's rows keep each class's own scan, an unboxed class's too,
+  as on b581aa84b5ca.
+
+## 9. Finds, one line each, recorded and not worked
+
+- Reader 8's F2 to F4 of this verdict (X8): master's own or layout by
+  the coordinator's ruling; not taken, no line of the piece's for them.
+- T7's fault (part 6): on the bare tip the cause of an exception object
+  raised under a rescue and leaving through an ensure is nil, for a
+  builtin object too. Master's own; stated in the texts, not worked.
+- share-check-test fails on the bare tip of the cut and on the head
+  alike (test/share_check/send_arms.rb, 160 marks recorded, 159 by the
+  run): part 7. Master's own in this container.
+- With clang, five quiet programs cost 1 or 2 more at a never-taken arm
+  and the sign turns with the statement's form (part 2): layout, stated.
+- At `rescue Error => e` with ParseError under Error, `e.line = 3 if
+  e.is_a?(ParseError)` does not build ("'sp_Error' has no member named
+  'cls_id'" from the C compiler), the bare tip and the head alike.
+- An object of such a class built by `.new` in a Thread and raised
+  there, met at the join eight times over, aborts at SPINEL_GC_STRESS=2
+  in some runs of each build, the bare tip and every head alike, and
+  more often on a loaded machine (part 7); where the bare tip does not
+  abort there it prints wrong lines.
+- Master's String Range fault under --share-strings at stress 2 is on
+  the bare tip 0890056b9665 too, by my own run: part 7.
+- thread_anon_class_display_text aborts at SPINEL_GC_STRESS=2 on the
+  bare tip 0890056b9665 and on the head, in the same four cells of
+  twelve.
+- share-verify-test fails on the bare tip in this container as on the
+  head: part 7.
+- Seen on earlier tips, bare and head alike, not run again: reader 8's
+  three on 40b81c3585b7 (an exception of such a class that was raised,
+  compared with one built by `Class.new`, is true; a literal message
+  caught by the class's own arm is not frozen; `full_message` on such a
+  class ends in NoMethodError); a subclass raised in a method and
+  caught by `rescue Err => e`, where `e.code = i` at that arm is the
+  program's only store of the parent's attribute, ends the run with
+  NoMethodError; `class A::Sub < A::Err` prints its class as Sub;
+  `e.exception("new")` on a kept value of an exception class of the
+  program ends the run with NoMethodError.
