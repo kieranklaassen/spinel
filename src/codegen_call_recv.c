@@ -11431,10 +11431,58 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "); })"); return 1;
       }
       if (a0 == TY_POLY) {
-        buf_printf(b, "({ sp_StrRange _t%d = ", tr); emit_expr(c, recv, b);
-        buf_puts(b, "; ");
-        if (hold) { emit_gc_root_tmp_refs(c, rt, tr, b); buf_puts(b, " "); }
-        buf_printf(b, "sp_RbVal _a%d = ", tr); emit_boxed(c, argv[0], b);
+        int eqq = sp_streq(name, "===") && srange_eqq_covers_boxed(c, id);
+        int fresh = operand_may_allocate(c, argv[0]);
+        /* --share-strings: a Range a variable holds is read as a copy of
+           each end, which nothing holds while the argument's call
+           allocates. Where the Range is read so (srange_live_read) and
+           the argument cannot give that variable another Range
+           (read_rebound_by), === runs the argument first and reads
+           the Range after it: nothing runs between that read and the
+           compare, and an end the argument changed is read as it is. Any
+           other Range is rooted in its temp before an argument that may
+           allocate, for === boxes the temp for a value that holds no
+           String. */
+        int late = eqq && srange_live_read(c, unwrap_parens(c, recv)) &&
+                   !arg_ran_first(recv, 0) && !read_rebound_by(c, recv, argv[0]);
+        int held = hold || (eqq && !late && repr_share_rule(c) && !arg_ran_first(recv, 0) && fresh);
+        if (late) {
+          buf_printf(b, "({ sp_RbVal _a%d = ", tr); emit_boxed(c, argv[0], b);
+          buf_puts(b, "; ");
+          if (fresh) buf_printf(b, "SP_GC_ROOT_RBVAL(_a%d); ", tr);
+          buf_printf(b, "sp_StrRange _t%d = ", tr); emit_expr(c, recv, b);
+        }
+        else {
+          buf_printf(b, "({ sp_StrRange _t%d = ", tr); emit_expr(c, recv, b);
+          buf_puts(b, "; ");
+          if (held) { emit_gc_root_tmp_refs(c, rt, tr, b); buf_puts(b, " "); }
+          buf_printf(b, "sp_RbVal _a%d = ", tr); emit_boxed(c, argv[0], b);
+        }
+        /* === is cover?, and for a boxed value it is new here: a String is
+           covered by its bytes, the plain one and the handle's alike. Any
+           other value keeps the equality with the boxed Range it had, and
+           one test on the tag sends it there; one the argument has just
+           made is held while the Range is boxed.
+           --share-strings: a temp made before the argument is a copy of
+           each end as it was, or the copies a Struct member's Range was
+           made with. A String is covered there by the ends read from the
+           Strings the Range keeps, once the argument is there
+           (sp_srange_cover_boxed_now); any other value is compared with
+           the temp boxed, which is rooted above. A Range read after the
+           argument is compared as it is. */
+        if (eqq) {
+          buf_printf(b, "; (sp_bool)(((1u << _a%d.tag) & (1u << SP_TAG_STR | 1u << SP_TAG_OBJ)) && (_a%d.tag == SP_TAG_STR || _a%d.cls_id == SP_BUILTIN_STRBUF) ? ",
+                     tr, tr, tr);
+          if (repr_share_rule(c) && !late)
+            buf_printf(b, "sp_srange_cover_boxed_now(_t%d, _a%d) : ", tr, tr);
+          else
+            buf_printf(b, "(_a%d.tag == SP_TAG_STR ? sp_srange_cover_bytes(_t%d.first, _t%d.last, _t%d.excl, _a%d.v.s)"
+                          " : sp_srange_cover_handle(_t%d.first, _t%d.last, _t%d.excl, _a%d.v.p)) : ",
+                       tr, tr, tr, tr, tr, tr, tr, tr, tr);
+          if (fresh && !late) buf_printf(b, "({ SP_GC_ROOT_RBVAL(_a%d); sp_poly_eq(sp_box_srange(_t%d), _a%d); })); })", tr, tr, tr);
+          else buf_printf(b, "sp_poly_eq(sp_box_srange(_t%d), _a%d)); })", tr, tr);
+          return 1;
+        }
         /* a boxed shared String handle is a String too: its text, asked
            after the plain String. include? walks to it as it does to a
            plain String; cover? compares it by its bytes, out of line

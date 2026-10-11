@@ -2967,6 +2967,14 @@ static SP_NOINLINE SP_COLD sp_bool sp_srange_cover_handle_now(sp_StrRange r, voi
   r = sp_srange_ends_now(r);
   return sp_srange_cover_handle(r.first, r.last, r.excl, h);
 }
+/* --share-strings: === of a String Range with a boxed String, the plain
+   one and the handle's alike, once the argument is there: the ends are
+   read again from the Strings the Range keeps (sp_srange_ends_now). */
+static SP_NOINLINE SP_COLD sp_bool sp_srange_cover_boxed_now(sp_StrRange r, sp_RbVal v) {
+  r = sp_srange_ends_now(r);
+  return v.tag == SP_TAG_STR ? sp_srange_cover_bytes(r.first, r.last, r.excl, v.v.s)
+                             : sp_srange_cover_handle(r.first, r.last, r.excl, v.v.p);
+}
 /* The object pointer a boxed value carries, for a slot that holds pointers
    rather than sp_RbVal (a PtrArray of one user class). nil is a NULL element,
    which is how that slot spells nil already. */
