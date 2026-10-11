@@ -1,0 +1,168 @@
+A String Range's cover? and include? read a boxed appended String
+
+    h = {"k" => "a".dup, "n" => 1}
+    h["k"] << "b"
+    r = ("aa".."az")
+    p r.cover?(h["k"])
+    p r.include?(h["k"])
+    p r.member?(h["k"])
+
+printed `false` three times, with and without --share-strings; CRuby
+prints `true` three times.
+
+A String something appends to is held as its shared handle, and a boxed
+read of it carries the handle (SP_BUILTIN_STRBUF), not a plain boxed
+String. emit_range_call wrote the membership of a typed String Range
+with a boxed argument as `_a.tag == SP_TAG_STR && sp_srange_cover(...)`:
+the handle carries another tag and was no member. A Hash with one
+element the program appends to holds every String it was built with as
+a handle, so the "ab" of `"p" => "ab"` beside it was no member either.
+
+The handle is asked after the plain String. include? walks to its text
+as it does to a plain String's; cover? compares it by its bytes, out of
+line (sp_srange_cover_handle). A nil stored among handles is a box with
+no handle and is no member.
+
+With --share-strings a Range a variable holds is read as a copy of each
+end, made before the argument (sp_srange_live), and nothing holds those
+copies while the argument's call allocates; a Struct member's or a
+reader's Range hands on the copies it was made with. So the handle is
+compared with the ends read again from the Strings the Range keeps, once
+the argument is there (sp_srange_ends_now): no copy is made, and nothing
+allocates between that read and the compare. Where the copies are made
+as the call begins, by a variable's read or by a Range written there,
+and the argument is a pure read (subtree_is_pure_read: a variable, an
+element of a typed Array, a reader's field), nothing runs between the
+two: the copies are the ends still and are compared as they are, with no
+second read. That a read is live is emit_expr's own test, now one helper
+both call (srange_live_read). The plain String's line is master's, as it
+was.
+
+The arm is written only where a box tagged as a handle is known to hold
+one, which program_strbuf_boxes answers once for the program, before
+any C is written. Master's C stays, byte for byte:
+
+- in a program that holds no String as a handle, built with
+  --share-strings or without;
+- in one that stores the String a method call on an object of the
+  program's returns where a handle is wanted, the call no read of a
+  handle's slot through a receiver: this scan does not follow what
+  such a call renders, so it does not say what that box holds;
+- in a program that has, or may have, a method of the call's name or a
+  <=>, an == or a succ of its own, in any class: this call does not ask
+  them, before or after. include? and member? stand aside for four
+  names more: a to_int, a method_missing, a <= or a <.
+
+"May have" is asked of two tables. A def in the builtin's class is in
+the class table (builtin_reopened). The rest is an_prog_never_gives,
+the analysis's walk of the program as written (analyze.c). It reads
+the program ahead of every rewrite and of the arm a test of the engine
+drops: no def and no Symbol of the name anywhere, and no site where a
+method is named, made, mixed in or loaded by something the text does
+not spell. So `alias <=> index`, `def lo.<=>`, a
+`String.define_method(:<=>) { }` under a rescue, a `send(name)`, an
+eval and a file the compiler did not read leave master's C. So does
+`class String; prepend Kernel; end`: Kernel's <=> answers nil for two
+Strings that differ, and no text of the program's holds it. And so
+does a `def ==` in a class of the program's own: the walk does not ask
+where a def lands. A package's Ruby is the program's text to the walk,
+so a program that requires set, csv or uri keeps master's C too.
+
+The names are the ones CRuby asks, call by call. cover? asks its own and
+<=> of the ends. include? and member? ask their own, then each end for
+to_int, which a def in String or anywhere above it, an alias, a made
+method or a method_missing can answer; an end that answers an Integer
+makes the call cover? by the compare. Otherwise CRuby walks: nothing
+more for two one-character ASCII ends, == for two all-digit ends that
+fit a machine word, Integer#<= (#< for a Range without its end),
+Integer#succ and == for all-digit ends past one, String#succ and == for
+any other.
+Ten names with the three calls' own; === is not asked here. The
+runtime's walk asks none of them, so include? and member? keep master's
+C where the program may give any class a to_int, a method_missing, a <=
+or a <; cover? does not ask those four and takes the arm there.
+
+Cost: none where the C stays. In a program that holds a handle, a
+membership call with a boxed argument runs more instructions (callgrind,
+300,000 turns of `n += 1 if r.cover?(x)`, gcc 13.3 and clang 18.1). In a
+while loop: 4 and 2 a call for a plain String held in a local, 6 and 2
+for one read from an Array each turn, 6 and 4 for an Integer, 4 and 1
+for include? of a plain String. In a block: 5 and 2, 8 and 2, 6 and 4, 5
+and 1. Where the argument is the appended String itself the call now
+compares it, which master did not: 212 and 162 instructions a call for
+cover? (209 to 210 and 160 to 161 with --share-strings), and include?
+walks the Range for it as CRuby does, 2,589 and 2,577 a call over
+("aa".."ad"). With --share-strings the ends are read again where code
+runs for the argument: with the String a call hands on in the Range, 9
+and 16 more a call for cover? of a Range of two literals, 10 and 15 of
+two appended Strings, 14 and 16 and 13 and 14 for include?; with it out
+of the Range 9 and 16, 10 and 15, 15 and 16 and 14 and 14. Nothing more
+where the argument is a pure read. Compiling such a call runs 31,900 to
+32,700 more instructions (callgrind over `spinel -c`: 2.5% over 1,000 of
+them and over 2,000): the arm, and in it 1,170 a call for the questions,
+eight for cover? and twelve for include? and member?, each a lookup in a
+table the analysis built. A program with no such call does not ask:
+optcarrot's C is byte for byte the same, and it prints checksum 59662 as
+before.
+
+Not here. A String stored from a method call the scan does not follow
+(`{"k" => box.text}` beside an appended String, without --share-strings)
+still answers false: that program keeps master's C. So does one stored
+from a reader called without a receiver (`{"k" => name}` in a method of
+its class, with --share-strings). cover? of a plain String still
+compares up to its first NUL. A String Range the call does not see as
+typed (read out of an Array or a Hash, or a "Range or nil" local called
+with `&.`) and `r.method(:cover?).call(x)` still answer false for the
+handle. include? and member? of a program with a def or a Symbol of
+to_int, method_missing, <= or < anywhere still answer false for the
+handle, also where CRuby would not ask that method or would get no
+Integer from it: a to_int in a class of the program's own, one that
+answers nil, a Float or a String, an `attr_accessor :to_int`, a
+method_missing that calls super or sits in a class of its own, a
+respond_to_missing? or a respond_to? that names to_int. The walk does
+not ask where a def lands or what it answers, and these seven are the
+price of that. A String master holds otherwise than CRuby by a limit it
+documents is compared as master holds it, for the handle now as for a
+plain String on master: the default build answers by the Range's copies
+of its ends where the program changes in place the String an end was
+made from (docs/limitations.md, "A String Range keeps copies of its
+endpoints"); under --share-strings master keeps those Strings and the
+handle is compared with them as they are once the call's argument has
+run, as CRuby does, an end that argument changes included, while a plain
+String is compared there as on master, with the ends read before the
+argument; and a String transcoded out of UTF-8 is compared by the UTF-8
+bytes master keeps for it. A method the program gave a builtin class and
+master answers by the builtin (its own select, map, find or each of
+Array, its own << of String) is still answered by the builtin, so a
+membership call on a Range it would not have made, with a String it
+would not have built, or in a block it would not have run is now true
+where it was false; that method is not changed here. `===` and case/when
+of a String Range with a boxed value are their own change.
+
+Test: test/str_range_member_boxed_handle.rb (expected from CRuby 3.3.6),
+run under GC stress by its header line: its last block makes both ends
+of its Range where it is written.
+test/str_range_member_boxed_handle_collected.rb, under GC stress the
+same way: a Range in a local asked for the String its argument's call
+hands on after allocating, a Range in a constant that alone holds its
+two ends, and the handle read from a local, compared with the copies as
+they are. test/share/str_range_member_boxed_handle_end_changed.rb, with
+--share-strings only: an end changed in place between two calls and by
+the argument's own call, and a Range a Struct member or a reader holds;
+the default build answers these from the Range's copies, the limit named
+above. Twelve programs with a <=> ahead of String's own that the class
+table does not hold, each right on master and kept:
+test/str_range_cover_own_compare_alias.rb, _rescued.rb, _singleton.rb,
+_prepend_in_method.rb, _module_prepends.rb, _dropped_block.rb,
+_inject.rb, _erb.rb, _inject_block.rb, _own_lambda.rb, _engine_arm.rb
+and _prepend_kernel.rb. Sixteen more where CRuby's include? gets an
+Integer from an end's to_int, or walks by Integer#<=, #< or #succ, each
+right on master and kept: test/str_range_include_own_to_int_def.rb,
+_to_int_object.rb, _to_int_kernel.rb, _to_int_comparable.rb,
+_to_int_mixed.rb, _to_int_alias.rb, _to_int_alias_method.rb,
+_to_int_define_method.rb, _to_int_singleton.rb,
+_method_missing_string.rb, _method_missing_respond.rb,
+_method_missing_object.rb, _method_missing_basic_object.rb,
+_integer_le.rb, _integer_lt.rb and _integer_succ.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
