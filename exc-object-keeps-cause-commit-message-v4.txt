@@ -1,0 +1,56 @@
+An exception object keeps its cause through an ensure
+
+An exception object raised while another exception is handled, and
+leaving through an ensure, came out with no cause:
+
+    class Wrapped < StandardError; end
+    def work
+      raise Wrapped.new("wrapped")
+    ensure
+      puts "cleanup: #{$!.cause.inspect}"
+    end
+    begin
+      begin
+        raise KeyError, "low"
+      rescue KeyError
+        work
+      end
+    rescue Wrapped => e
+      p e.cause
+    end
+
+printed `cleanup: nil` and `nil`; CRuby prints the KeyError twice.
+Raised by class and message (`raise Wrapped, "wrapped"`) the same
+program was right. An exception the runtime makes as it raises, a
+NoMethodError that holds its name or a KeyError that holds its key,
+lost its cause the same way.
+
+A raise stages the cause in sp_pending_cause and leaves it to the
+rescue that catches the exception to put it on the object. An ensure's
+landing is no catch: an exception with no object gets one there,
+holding the staged cause, but an object that already exists was left
+as it was. The ensure then resumes the exception with
+sp_reraise_continues, which reads the cause from the object, and found
+none.
+
+An object now takes that cause at the raise that first hands it over,
+where it has none and no `cause:` was given, as CRuby gives it at the
+raise: the exception being handled, else the one in flight through an
+ensure, by the test sp_raise_cls stages it with
+(sp_exc_implicit_cause). sp_exc_takes_cause does it, called for an
+object the program raises (sp_raise_exc) and for one the runtime
+makes as it raises: a NoMethodError that holds its name, a KeyError
+that holds its key, a StopIteration, a signal's exception. Every
+landing then sees the cause: an ensure, a synchronize block, a
+filter's block, an else clause. An explicit `cause: nil` stays nil,
+an object that has a cause keeps it, and a frozen object takes none.
+
+Not at a landing that raises again the exception it holds, a rescue
+that does not match or Kernel#loop: that raise is not the first, and
+giving the cause there would put the handled exception on an object
+raised with `cause: nil`.
+
+The compiler is untouched, so no program's C changes, and a raise by
+class and message that makes no object counts no instruction more.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
