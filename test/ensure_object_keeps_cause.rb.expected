@@ -1,0 +1,35 @@
+a1 ensure
+a1: cause #<KeyError: low>
+a2 ensure
+a2: Wrapped a2, cause #<KeyError: low>
+a3 ensure: #<KeyError: low>
+a3: Wrapped a3, cause #<KeyError: low>
+a4 ensure
+a4: Own own 4, cause #<KeyError: low>
+a6 ensure
+a6: Wrapped a6, cause #<KeyError: low>
+a7 ensure
+a7: Wrapped a7, cause #<KeyError: low>
+a8 body
+a8 ensure
+a8: Wrapped a8, cause #<KeyError: low>
+b1 ensure
+b1: Wrapped b1, cause #<KeyError: low>
+b2 ensure
+b2: Wrapped b2, cause nil
+b4 ensure
+b4: Wrapped b4, cause #<ArgumentError: first>
+b6 ensure
+b6: Wrapped b6, cause nil
+b7 ensure, cause nil
+b7: Wrapped b7, cause nil
+b8 ensure
+b8: Wrapped b8, cause nil
+b9 ensure, cause nil
+b9: Wrapped b9, cause nil
+c1 ensure, cause #<KeyError: low>
+c1: NoMethodError frob, cause #<KeyError: low>
+c2 ensure, cause #<KeyError: low>
+c2: KeyError key not found: :zz, cause #<KeyError: low>
+c3 ensure
+c3: StopIteration iteration reached an end, cause #<KeyError: low>
