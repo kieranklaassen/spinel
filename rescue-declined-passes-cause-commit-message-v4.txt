@@ -1,0 +1,48 @@
+A rescue that declines an exception passes it on with its cause
+
+A rescue none of whose clauses takes an exception raised it again as a
+new raise, and a new raise works the cause out anew: the exception
+left with the handled exception as its cause, whatever it was raised
+with.
+
+    begin
+      begin
+        raise KeyError, "low"
+      rescue KeyError
+        begin
+          raise TypeError, "t", cause: nil
+        rescue IOError
+          puts "not reached"
+        end
+      end
+    rescue TypeError => e
+      p e.cause
+    end
+
+printed `#<KeyError: low>`; CRuby prints `nil`. An explicit cause that
+is another exception was replaced the same way, and a rescue modifier
+did the same to what is no StandardError. A nested ensure raises into
+the rescue around it, so an exception leaving an inner ensure for
+clauses that decline it came this way too.
+
+In CRuby a rescue that does not match is no raise: the exception goes
+on. The pass-through now sets sp_reraise_continues, as an ensure that
+resumes an exception does, and sp_raise_cls hands on the object's own
+cause. An exception raised by class and message has no object at that
+point: its cause is still staged in sp_pending_cause, and continuing
+keeps that.
+
+A synchronize block or a filter's block resumes an exception that has
+no object through the same raise, so `raise TypeError, "t", cause: nil`
+leaving such a block in a rescue body kept the handled exception as
+its cause, and now has none there either.
+
+Not where a clause's operand runs code of the program before the
+rescue declines (`rescue pick`, a method call): that code may raise
+and rescue on its own, which replaces the staged cause. Such a rescue
+raises anew as it did (rescue_operand_runs_code). An operand read
+where the clause stands, a constant, through a path of constants too,
+or a variable, splatted or not, runs none, and continues like a class
+name.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
