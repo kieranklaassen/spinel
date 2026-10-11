@@ -1,0 +1,103 @@
+--- message v17, on the handoff
++++ message v18
+@@ -29,14 +29,18 @@
+ reader's Range hands on the copies it was made with. So the handle is
+ compared with the ends read again from the Strings the Range keeps, once
+ the argument is there (sp_srange_ends_now): no copy is made, and nothing
+-allocates between that read and the compare. Where the copies are made
+-as the call begins, by a variable's read or by a Range written there,
+-and the argument is a pure read (subtree_is_pure_read: a variable, an
+-element of a typed Array, a reader's field), nothing runs between the
+-two: the copies are the ends still and are compared as they are, with no
+-second read. That a read is live is emit_expr's own test, now one helper
+-both call (srange_live_read). The plain String's line is master's, as it
+-was.
++allocates between that read and the compare. Where no call can run
++between the copies and the compare, the copies are the ends still and
++are compared as they are, with no second read: the Range is a variable's
++read, or is written there with two ends that are each a variable's read
++or a plain String literal, and the argument is a variable's read (a
++local, an instance variable, a class variable, a constant, self). Any
++other argument (an index, a reader's field, an operator, any call) and a
++Range written there with an end that holds a call read the ends again: a
++call can run the program's own code, which can change an end. One helper
++asks that of the argument and of the two ends (operand_holds_no_call);
++that a read is live is emit_expr's own test, now one helper both call
++(srange_live_read). The plain String's line is master's, as it was.
+ 
+ The arm is written only where a box tagged as a handle is known to hold
+ one, which program_strbuf_boxes answers once for the program, before
+@@ -92,13 +96,22 @@
+ compares it, which master did not: 212 and 162 instructions a call for
+ cover? (209 to 210 and 160 to 161 with --share-strings), and include?
+ walks the Range for it as CRuby does, 2,589 and 2,577 a call over
+-("aa".."ad"). With --share-strings the ends are read again where code
+-runs for the argument: with the String a call hands on in the Range, 9
+-and 16 more a call for cover? of a Range of two literals, 10 and 15 of
+-two appended Strings, 14 and 16 and 13 and 14 for include?; with it out
+-of the Range 9 and 16, 10 and 15, 15 and 16 and 14 and 14. Nothing more
+-where the argument is a pure read. Compiling such a call runs 31,900 to
+-32,700 more instructions (callgrind over `spinel -c`: 2.5% over 1,000 of
++("aa".."ad"). With --share-strings the ends are read again where the
++argument or an end of a Range written there holds a call, since a call
++can run the program's own code, which can change an end: with the String
++a call hands on in the Range, 9 and 16 more a call for cover? of a Range
++of two literals, 10 and 15 of two appended Strings, 14 and 16 and 13 and
++14 for include?; with it out of the Range 9 and 16, 10 and 15, 15 and 16
++and 14 and 14; with an Array's element or a reader's field as the
++argument 10 to 15 and 11 to 16, over cover? and include? of two literals
++and of two appended Strings, the String in the Range and out of it; with
++a reader's value as an end of a Range written there 12 and 15 for cover?
++and 14 and 12 for include?. That read is on the handle's side: a plain
++String read from an Array's element does not reach it (0 and -1 a call
++in a while loop, 0 and -1 in a block). Nothing more where the Range is a
++variable's, or is written there of variables or plain literals, and the
++argument is a variable's read. Compiling such a call runs 31,900 to
++32,800 more instructions (callgrind over `spinel -c`: 2.5% over 1,000 of
+ them and over 2,000): the arm, and in it 1,170 a call for the questions,
+ eight for cover? and twelve for include? and member?, each a lookup in a
+ table the analysis built. A program with no such call does not ask:
+@@ -131,13 +144,19 @@
+ run, as CRuby does, an end that argument changes included, while a plain
+ String is compared there as on master, with the ends read before the
+ argument; and a String transcoded out of UTF-8 is compared by the UTF-8
+-bytes master keeps for it. A method the program gave a builtin class and
+-master answers by the builtin (its own select, map, find or each of
+-Array, its own << of String) is still answered by the builtin, so a
+-membership call on a Range it would not have made, with a String it
+-would not have built, or in a block it would not have run is now true
+-where it was false; that method is not changed here. `===` and case/when
+-of a String Range with a boxed value are their own change.
++bytes master keeps for it. An end the other end's code changes while the
++Range is written (an append `(a..(a << "z"))`, a run of statements
++`(a..(a << "c"; z))`, a method's or a block's value) is that limit too
++wherever master writes the two ends as operands of one C call, so that
++which is read first is the C compiler's: the default build, and
++--share-strings where master keeps no shared String for the two ends. A
++method the program gave a builtin class and master answers by the
++builtin (its own select, map, find or each of Array, its own << of
++String) is still answered by the builtin, so a membership call on a
++Range it would not have made, with a String it would not have built, or
++in a block it would not have run is now true where it was false; that
++method is not changed here. `===` and case/when of a String Range with a
++boxed value are their own change.
+ 
+ Test: test/str_range_member_boxed_handle.rb (expected from CRuby 3.3.6),
+ run under GC stress by its header line: its last block makes both ends
+@@ -148,10 +167,12 @@
+ two ends, and the handle read from a local, compared with the copies as
+ they are. test/share/str_range_member_boxed_handle_end_changed.rb, with
+ --share-strings only: an end changed in place between two calls and by
+-the argument's own call, and a Range a Struct member or a reader holds;
+-the default build answers these from the Range's copies, the limit named
+-above. Twelve programs with a <=> ahead of String's own that the class
+-table does not hold, each right on master and kept:
++the argument's own call, a Range a Struct member or a reader holds, a
++Range written there whose second end's code changes the first, and an
++Array's element as the argument in a program with its own Array#[] that
++changes an end; the default build answers these from the Range's copies,
++the limit named above. Twelve programs with a <=> ahead of String's own
++that the class table does not hold, each right on master and kept:
+ test/str_range_cover_own_compare_alias.rb, _rescued.rb, _singleton.rb,
+ _prepend_in_method.rb, _module_prepends.rb, _dropped_block.rb,
+ _inject.rb, _erb.rb, _inject_block.rb, _own_lambda.rb, _engine_arm.rb
