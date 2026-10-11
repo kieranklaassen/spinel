@@ -231,6 +231,7 @@ int emit_exc_message_equal(Compiler *c, int recv, int arg, Buf *b);
 int strbuf_route_exc_message(Compiler *c, int v);
 int strbuf_route_srange_end(Compiler *c, int v);
 void emit_slot_expr(Compiler *c, int id, Buf *b);
+int srange_live_read(Compiler *c, int id);
 /* A `next` value a block's boxed answer slot takes: a shared String as its
    handle's box under --share-strings (codegen_stmt.c) */
 void emit_boxed_next_value(Compiler *c, int v, Buf *b);
@@ -1113,6 +1114,11 @@ void nameset_add(NameSet *s, const char *nm);
 void emit_local_ref(Compiler *c, int scope_node, const char *name, Buf *b);
 void emit_poly_lift_ref(const char *ref, Buf *b);
 int strbuf_marked_yields_handle(Compiler *c, int v);
+enum { SB_BOXES_NONE, SB_BOXES_HANDLES, SB_BOXES_UNSURE };
+extern int g_strbuf_boxes;
+int program_strbuf_boxes(Compiler *c);
+int builtin_reopened(Compiler *c, const char *cls, const char *name);
+int srange_member_builtin(Compiler *c, const char *name);
 void emit_scope_local_ref(Compiler *c, Scope *s, const char *name, Buf *b);
 void emit_typed_elem_value(Compiler *c, int node, TyKind et, Buf *b);
 void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent);
