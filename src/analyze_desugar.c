@@ -3575,6 +3575,12 @@ int desugar_paren_def_body(Compiler *c) {
   return changed;
 }
 
+/* Set once a test of the engine was decided below and what the other
+   engine runs was dropped: the node table no longer holds a class, a
+   constant's write or a call that stood there, and CRuby runs it. What
+   proves "the program holds no such thing" from the table asks this
+   first. */
+int g_engine_decided = 0;
 int desugar_engine_branches(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count;
@@ -3687,6 +3693,7 @@ int desugar_engine_branches(Compiler *c) {
     if (ck == NK_ModuleNode || ck == NK_ClassNode || ck == NK_SingletonClassNode)
       changed |= engine_splice_list(nt, nt_ref(nt, id, "body"));
   }
+  if (changed) g_engine_decided = 1;
   return changed;
 }
 

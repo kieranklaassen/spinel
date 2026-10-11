@@ -70,6 +70,194 @@ static void emit_str_between_cmp(int tv, int tbnd, const char *op, Buf *b) {
              tbnd, tv, tbnd, op);
 }
 
+/* `K === x` for a constant the program gave a value is the value's own ===,
+   as for a local that holds it, and not the class test `Class === x`, which
+   no value passes. Answers 1 for the kinds of K and x whose === then answers
+   as CRuby does; for any other pair the class arm keeps the call, as
+   before: an Integer or a Symbol against an Array, a Hash or a Range raises
+   NoMethodError there, a String against an Array, a Bignum against a Float
+   and a Float against a Bignum do not build, and an object as x is asked
+   nothing where CRuby asks its ==. The nil of an Integer is a sentinel in
+   its slot, which a beginless Range covers and a Float Range can refuse
+   with a TypeError, and no slot says for sure that it cannot hold it (an
+   ivar never assigned, a fetch with a nil default): a Range takes an
+   Integer only where it is written as a literal. And only where the
+   operand runs nothing: the value's === reads the constant in one C
+   expression with its operand, in the order the C compiler picks, so an
+   operand that binds the constant anew or changes its String in place
+   would be read before by one compiler and after by the other.
+
+   A constant's read is typed by its name alone, and CRuby reads a bare
+   name by where it stands: `Foo === x` outside the class that holds
+   `Foo = 3` is not that 3 but whatever Foo names there, a class of the
+   program, one of CRuby's own that no table here lists (Marshal), or one a
+   file brings that the compiler did not read. So the call is taken only
+   where CRuby's lookup must reach the value: the name is bound once in the
+   whole program, by a plain write, and the call stands in the same class
+   or module body as that write, or both at the top level. CRuby asks that
+   body's own table first, ahead of the bodies around it and of the
+   class's ancestors. const_bound_where_read answers that from the node
+   table. A name written under two paths was renamed apart by
+   qualify_colliding_consts (X__LIM, Y__LIM), and two paths can name one
+   class (`class Object`, `class A::X`, `Y = X; class Y`): the name counted
+   is the part after the last `__`.
+
+   And only where no call can bind the name anew or take it away behind the
+   table's back. an_prog_never_gives (analyze.c) reads the program as
+   written: the name is no Symbol anywhere (`remove_const(:LIM)`), and the
+   program reaches no method by a name it computes, runs no text and loads
+   no file the compiler did not read. A const_set or a remove_const with a
+   computed name is none of those, so the two words are looked for here, as
+   a call (cb_build) and as a Symbol (the walk). Such a call is one this
+   compiler does not perform: it raises NoMethodError, the program can
+   rescue it and run on, and in CRuby the constant is another by then. The
+   node table no longer holds an arm the analysis dropped under a test it
+   decided, which CRuby runs (g_engine_decided): a class of that name or
+   such a call may stand in it, and every call stays the class test. */
+
+/* g_cb_of[n]: the innermost class, module or singleton class body node n
+   stands in, as that body's node; -1 at the top level, -2 where two bodies
+   reach the node, -3 where the walk from the root did not come. A method
+   an include hands to another class keeps its one def node, so its body is
+   the module's, as its cref is in CRuby. */
+static int *g_cb_of, g_cb_n = -1;
+/* every node that binds a constant, by the name it binds: a plain write
+   with the body it stands in, and -2 for a write through a path
+   (`A::NAME = v`) and for a class or a module of that name. Sorted by the
+   name as written (cb_build), so that a call finds its name's bindings
+   without walking the others */
+typedef struct { char *name; const char *leaf; int body; } ConstBinding;
+static ConstBinding *g_cw;
+static int g_cw_n, g_cw_cap, g_cw_blind;
+
+/* the name as the program wrote it: what follows the last `__`, the mark
+   qualify_colliding_consts and qualify_colliding_classes put between a
+   path and a name. A name the program wrote with `__` in it is cut short
+   too, and then counts with more names than its own. */
+static const char *const_leaf(const char *n) {
+  const char *leaf = n;
+  for (const char *p = strstr(n, "__"); p; p = strstr(p + 1, "__")) if (p[2] && p[2] != '_') leaf = p + 2;
+  return leaf;
+}
+static void cb_walk(const NodeTable *nt, int id, int body) {
+  if (id < 0 || id >= g_cb_n || g_cb_of[id] == body || g_cb_of[id] == -2) return;
+  if (g_cb_of[id] != -3) body = -2;
+  g_cb_of[id] = body;
+  NodeKind k = nt_kind(nt, id);
+  int own = body != -2 && (k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode)
+            ? nt_ref(nt, id, "body") : -1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) {
+    int r = nt_ref_at(nt, id, i);
+    cb_walk(nt, r, r >= 0 && r == own ? id : body);
+  }
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, id, i, &m);
+    for (int j = 0; j < m; j++) cb_walk(nt, ids[j], body);
+  }
+}
+static void cw_add(const char *name, int body) {
+  char *dup = name ? strdup(name) : NULL;
+  if (g_cw_n >= g_cw_cap) {
+    int cap = g_cw_cap ? g_cw_cap * 2 : 32;
+    void *p = realloc(g_cw, sizeof(*g_cw) * (size_t)cap);
+    if (p) { g_cw = p; g_cw_cap = cap; }
+  }
+  /* a binding whose name cannot be kept: no name is proved after it */
+  if (!dup || g_cw_n >= g_cw_cap) { free(dup); g_cw_blind = 1; return; }
+  g_cw[g_cw_n].name = dup;
+  g_cw[g_cw_n].leaf = const_leaf(dup);
+  g_cw[g_cw_n++].body = body;
+}
+static int cw_by_leaf(const void *a, const void *b) {
+  return strcmp(((const ConstBinding *)a)->leaf, ((const ConstBinding *)b)->leaf);
+}
+static __attribute__((cold)) void cb_build(const NodeTable *nt) {
+  static const NodeKind plain[] = { NK_ConstantWriteNode, NK_ConstantOrWriteNode, NK_ConstantAndWriteNode,
+    NK_ConstantOperatorWriteNode, NK_ConstantTargetNode };
+  static const NodeKind other[] = { NK_ConstantPathWriteNode, NK_ConstantPathOrWriteNode,
+    NK_ConstantPathAndWriteNode, NK_ConstantPathOperatorWriteNode, NK_ConstantPathTargetNode, NK_ClassNode,
+    NK_ModuleNode };
+  g_cb_n = nt->count;
+  g_cb_of = malloc(sizeof(int) * (size_t)(g_cb_n > 0 ? g_cb_n : 1));
+  if (!g_cb_of) { g_cb_n = 0; return; }
+  for (int i = 0; i < g_cb_n; i++) g_cb_of[i] = -3;
+  cb_walk(nt, nt->root_id, -1);
+  for (size_t i = 0; i < sizeof plain / sizeof *plain; i++)
+    NT_FOREACH_KIND(nt, plain[i], w) cw_add(nt_str(nt, w, "name"), w < g_cb_n && g_cb_of[w] >= -1 ? g_cb_of[w] : -2);
+  for (size_t i = 0; i < sizeof other / sizeof *other; i++)
+    NT_FOREACH_KIND(nt, other[i], w) {
+      int t = nt_ref(nt, w, other[i] == NK_ClassNode || other[i] == NK_ModuleNode ? "constant_path" : "target");
+      cw_add(nt_str(nt, t >= 0 ? t : w, "name"), -2);
+    }
+  /* a constant bound or taken away by a call: by a name this walk does not
+     read, so no name is proved */
+  NT_FOREACH_KIND(nt, NK_CallNode, v) {
+    const char *cn = nt_str(nt, v, "name");
+    if (cn && (sp_streq(cn, "const_set") || sp_streq(cn, "remove_const"))) g_cw_blind = 1;
+  }
+  if (g_cw_n > 1) qsort(g_cw, (size_t)g_cw_n, sizeof *g_cw, cw_by_leaf);
+}
+/* Is the constant `kn`, read at node `recv`, bound once in the program, by a
+   plain write in the body `recv` stands in? Answered only once the analysis
+   is done with the table. */
+static int const_bound_where_read(const NodeTable *nt, int recv, const char *kn) {
+  if (!g_scopes_settled) return 0;
+  if (g_cb_n < 0) cb_build(nt);
+  if (g_cw_blind || recv >= g_cb_n || g_cb_of[recv] < -1) return 0;
+  const char *leaf = const_leaf(kn);
+  int lo = 0, hi = g_cw_n;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (strcmp(g_cw[mid].leaf, leaf) < 0) lo = mid + 1; else hi = mid;
+  }
+  /* the first binding of the name; a second one beside it is not "once" */
+  if (lo >= g_cw_n || !sp_streq(g_cw[lo].leaf, leaf)) return 0;
+  if (lo + 1 < g_cw_n && sp_streq(g_cw[lo + 1].leaf, leaf)) return 0;
+  return g_cw[lo].body == g_cb_of[recv] && sp_streq(g_cw[lo].name, kn);
+}
+
+static int eqq_operand_runs_nothing(Compiler *c, const NodeTable *nt, int arg) {
+  NodeKind k = nt_kind(nt, arg);
+  /* a String literal, or one node of master's pure reads with no call in it:
+     a local, an instance or class variable, a constant of the program, self,
+     a number, a Symbol, nil, true or false */
+  if (k == NK_StringNode) return 1;
+  return k != NK_CallNode && k != NK_ParenthesesNode && k != NK_StatementsNode && subtree_is_pure_read(c, arg);
+}
+static int const_value_eqq(Compiler *c, const NodeTable *nt, int recv, TyKind rt, int arg) {
+  const char *kn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+  if (!kn || !comp_const(c, kn) || comp_class_index(c, kn) >= 0) return 0;
+  if (!eqq_operand_runs_nothing(c, nt, arg)) return 0;
+  TyKind at = comp_ntype(c, arg);
+  int scalar = at == TY_INT || at == TY_FLOAT || at == TY_STRING || at == TY_SYMBOL || at == TY_BOOL || at == TY_POLY;
+  int listed = scalar || at == TY_BIGINT || at == TY_RANGE || at == TY_STR_RANGE || at == TY_INT_ARRAY ||
+               at == TY_STR_ARRAY || at == TY_SYM_POLY_HASH;
+  int int_lit = nt_kind(nt, arg) == NK_IntegerNode;
+  int kinds;
+  switch ((int)rt) {
+  case TY_INT: case TY_SYMBOL: kinds = scalar || at == TY_BIGINT; break;
+  case TY_BIGINT:              kinds = listed && at != TY_FLOAT; break;
+  case TY_FLOAT:               kinds = listed && at != TY_BIGINT; break;
+  case TY_STRING:              kinds = listed && at != TY_INT_ARRAY && at != TY_STR_ARRAY; break;
+  case TY_RANGE:               kinds = (at == TY_INT && int_lit) || at == TY_BIGINT || at == TY_FLOAT; break;
+  case TY_FLOAT_RANGE:         kinds = listed && (at != TY_INT || int_lit); break;
+  case TY_STR_RANGE:
+  case TY_INT_ARRAY: case TY_FLOAT_ARRAY: case TY_STR_ARRAY: case TY_POLY_ARRAY:
+  case TY_STR_INT_HASH: case TY_SYM_POLY_HASH:
+    kinds = listed; break;
+  default:
+    kinds = ty_is_object(rt) && listed;
+  }
+  /* the two walks of the builtin class table and the questions where the
+     name is bound and whether a call can bind it anew last: only a call
+     about to leave the class arm pays for them */
+  return kinds && !is_builtin_class_name(kn) && builtin_class_id(kn) == 0 &&
+         !g_engine_decided && const_bound_where_read(nt, recv, kn) && an_prog_never_gives(const_leaf(kn), 0) &&
+         an_prog_never_gives("const_set", 0) && an_prog_never_gives("remove_const", 0);
+}
+
 /* between?, object_id / __id__, hash, nil? and === on a receiver whose kind decides them */
 int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* between?(lo, hi): lo <= self <= hi */
@@ -471,6 +659,7 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
      constant, either a bare `Integer` or a top-level `::Integer` (a
      ConstantPathNode with no parent), both naming the class in "name". (#2889) */
   if (recv >= 0 && argc == 1 && sp_streq(name, "===") && nt_type(nt, recv) &&
+      !const_value_eqq(c, nt, recv, rt, argv[0]) &&
       (sp_streq(nt_type(nt, recv), "ConstantReadNode") ||
        (sp_streq(nt_type(nt, recv), "ConstantPathNode") && nt_ref(nt, recv, "parent") < 0) ||
        /* a parented path is this same static dispatch only when its FULL
