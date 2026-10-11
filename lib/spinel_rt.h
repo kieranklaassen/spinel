@@ -14321,6 +14321,10 @@ static SP_INLINE void *sp_errinfo(void) {
   void *h = sp_cur_handled();
   return h && strcmp(((sp_Exception *)h)->cls_name, "FiberKillSignal") == 0 ? NULL : h;
 }
+/* Whether a raise made now has a cause to take: an exception is handled or
+   in flight. The places that first raise an object test it before they call
+   sp_exc_takes_cause, in one compare, so a raise with neither goes on there. */
+static SP_INLINE int sp_exc_cause_waits(void) { return ((intptr_t)sp_rescue_sp | (intptr_t)sp_inflight_cause) != 0; }
 /* Push a handled exception. sp_rescue_sp grows with recursion *through* rescue
    bodies (the handler stays pushed across the recursive call it makes, unlike a
    begin frame which is popped first), so a fixed SP_EXC_STACK_MAX can be reached;
@@ -14497,6 +14501,7 @@ static void sp_exc_print_uncaught(const char *cls, const char *msg) {
 }
 #ifdef SPINEL_EXT_HOST
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
+void *sp_exc_takes_cause(void *obj);
 #else
 /* The C stack ran out. Unlike the handler-stack exhaustion below, this one
    CAN be rescued: the frames that filled the stack are about to be unwound,
@@ -14551,6 +14556,29 @@ static SP_INLINE void *sp_exc_implicit_cause(void *c, void *obj) {
   if (obj && sp_gc_is_frozen(obj)) return ((sp_Exception *)obj)->cause;
   if (c && obj && sp_exc_cause_chain_reaches((sp_Exception *)c, obj)) return ((sp_Exception *)obj)->cause;
   return c;
+}
+/* An exception object takes its cause at the raise that first hands it over,
+   where it has none and no `cause:` was given: the cause sp_raise_cls stages
+   for that raise, as CRuby gives it at the raise. A landing that is no catch
+   (an ensure's) hands the object nothing, and the raise that resumes the
+   exception from there reads the cause from the object
+   (sp_reraise_continues). Called for an object the program raises
+   (sp_raise_exc) and for one the runtime makes as it raises. A landing that
+   raises again the exception it holds does not call it, so the exception
+   keeps what its raise decided, a nil among them. The kill signal a thread
+   or fiber unwinds by is no exception to the program, so it is no cause:
+   sp_errinfo answers nil for it, and is asked only where the class name
+   starts with its letter. Returns the object. */
+SP_COLD void *sp_exc_takes_cause(void *obj) {
+  sp_Exception *e = (sp_Exception *)obj;
+  if (e && !e->cause && !sp_explicit_cause_set) {
+    void *h = sp_cur_handled();
+    if (!h) h = sp_inflight_cause;
+    else if (((sp_Exception *)h)->cls_name[0] == 'F') h = sp_errinfo();
+    void *c = h == obj ? NULL : sp_exc_implicit_cause(h, obj);
+    if (c) { sp_gc_wb(obj); e->cause = (sp_Exception *)c; }
+  }
+  return obj;
 }
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
   /* Launder the message onto the string heap and root the copy before anything
@@ -14607,8 +14635,10 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
        strncmp(msg, "uninitialized constant ", 23) == 0))   /* const_get / bad const (#3034) */
     sp_pending_exc_obj = sp_exc_recover_named(cls, msg);
   /* the introspection staging (receiver/key/value) rides the carried object */
-  if (sp_pending_exc_flags && msg && cls && sp_exc_top > 0)
-    sp_pending_exc_obj = sp_exc_apply_staged(cls, msg, sp_pending_exc_obj);
+  if (sp_pending_exc_flags && msg && cls && sp_exc_top > 0) {
+    void *made = sp_exc_apply_staged(cls, msg, sp_pending_exc_obj);
+    sp_pending_exc_obj = sp_exc_cause_waits() ? sp_exc_takes_cause(made) : made;
+  }
   sp_pending_exc_flags = 0;
   /* An explicit `cause:` replaces the cause the raised object already
      carries, as CRuby's does: a rescue clause fills only an empty cause, so
@@ -15052,6 +15082,7 @@ static void *sp_exc_recover_named(const char *cls, const char *msg) {
   sp_Exception *e = sp_exc_new(cls, msg);   /* launders msg into the GC heap */
   SP_GC_ROOT(e);
   e->xname = sp_box_sym(sp_sym_intern(nb));
+  if (sp_exc_cause_waits()) sp_exc_takes_cause(e);
   return e;
 }
 /* Kernel#exit: raises a rescuable SystemExit carrying the status; with no
@@ -15084,6 +15115,7 @@ static void sp_raise_exc(volatile sp_Exception *ve) {
   /* Carry the object so a user subclass keeps its ivars across the
      longjmp; sp_raise_cls moves it into the current frame's slot. */
   sp_pending_exc_obj = (void *)e;
+  if (sp_exc_cause_waits() && sp_exc_top > 0) sp_exc_takes_cause(e);   /* the program raises it here */
   /* a message never given is the class name, as #message answers it */
   sp_raise_cls(e->cls_name, (e->msg && !e->msg_h) ? e->msg : sp_exc_message(e));
 }
@@ -15320,6 +15352,7 @@ SP_NORETURN void sp_raise_stop_iteration(sp_RbVal result) {
   sp_Exception *e = sp_exc_new("StopIteration", msg);
   e->result = result;
   sp_pending_exc_obj = (void *)e;
+  if (sp_exc_cause_waits() && sp_exc_top > 0) sp_exc_takes_cause(e);
   sp_raise_cls("StopIteration", msg);
 }
 #endif
@@ -18412,6 +18445,7 @@ static SP_UNUSED void sp_sig_default_handler(int no) {
   sp_sig_unblock(no, 0);
   if (no == SIGINT) sp_raise_cls("Interrupt", sp_exc_no_msg);   /* the message is empty, as the interrupt CRuby raises for the signal */
   sp_pending_exc_obj = sp_signal_exc_new(sp_box_int((sp_int)no));
+  if (sp_exc_cause_waits() && sp_exc_top > 0) sp_exc_takes_cause(sp_pending_exc_obj);
   sp_raise_cls("SignalException", "SIGTERM");
 }
 static SP_UNUSED void sp_sig_install_defaults(void) {
