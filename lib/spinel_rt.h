@@ -13807,6 +13807,21 @@ static SP_INLINE sp_int sp_poly_ary_offset(sp_RbVal v, sp_int n) {
   return (v.tag == SP_TAG_FLT || v.tag == SP_TAG_BIGINT) ? sp_oint_arg(sp_array_fill_offset_arg(v, 0))
                                                          : sp_poly_arg_int_chk_slow(v);
 }
+/* An Array's offset in fetch and values_at, as CRuby's NUM2LONG reads it:
+   sp_poly_arg_int_chk, with Array#fill's check for a Float or a Bignum past a
+   word in front of it (a NaN converted to the smallest Integer). The smallest
+   Integer is an offset like any other: boxed, its tag says it is no nil, and
+   held as a Bignum it still fits the word. Out of an int slot it arrives as
+   nil, so nil stays the offset 0 it was where no raise tells the two apart:
+   on an empty Array (n is the Array's length). */
+static SP_INLINE sp_int sp_poly_ary_offset(sp_RbVal v, sp_int n) {
+  if (v.tag == SP_TAG_INT) return v.v.i;
+  if (v.tag == SP_TAG_NIL && n == 0) return 0;
+  if (v.tag == SP_TAG_BIGINT && sp_bigint_bit_length((sp_Bigint *)v.v.p) < (sp_int)(sizeof(sp_int) * 8))
+    return (sp_int)sp_bigint_to_int((sp_Bigint *)v.v.p);
+  return (v.tag == SP_TAG_FLT || v.tag == SP_TAG_BIGINT) ? sp_array_fill_offset_arg(v, 0)
+                                                         : sp_poly_arg_int_chk_slow(v);
+}
 static sp_IntArray *sp_poly_as_int_array(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_INT_ARRAY) return (sp_IntArray *)v.v.p;
   if (v.tag == SP_TAG_NIL || !sp_poly_is_array_kind(v.cls_id)) return (sp_IntArray *)0;
@@ -16780,6 +16795,19 @@ static sp_RbVal sp_poly_arr_sample_n(sp_RbVal v, sp_int n) {
 static sp_RbVal sp_poly_struct_values(sp_RbVal v) {
   if (v.tag != SP_TAG_OBJ || v.cls_id < 0 || !sp_obj_struct_values_fn) return sp_box_nil();
   return sp_obj_struct_values_fn(v);
+}
+/* A splatted Integer Range among values_at's indexes: its members onto the
+   list. One that steps by one between two ends is walked as it stands; any
+   other goes through the array sp_range_to_ia makes of it, which raises for
+   an endless or a beginless one. */
+static void sp_poly_values_at_range(sp_PolyArray *idx, sp_Range r) {
+  if (sp_range_step(r) == 1 && r.last != INTPTR_MAX && r.first != INTPTR_MIN) {
+    for (sp_int i = r.first; i <= r.last - r.excl; i++) sp_PolyArray_push(idx, sp_box_int(i));
+    return;
+  }
+  sp_IntArray *ia = sp_range_to_ia(r); SP_GC_ROOT(ia);
+  for (sp_int i = 0; i < sp_IntArray_length(ia); i++)
+    sp_PolyArray_push(idx, sp_box_int(sp_IntArray_get(ia, i)));
 }
 /* Array#values_at indexes; Hash#values_at looks the keys up. */
 static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
