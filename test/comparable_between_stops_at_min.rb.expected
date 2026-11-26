@@ -1,0 +1,19 @@
+false
+false
+false
+false
+false
+false
+false
+false
+false
+false
+true
+true
+false
+ArgumentError: comparison of Integer with String failed
+ArgumentError: comparison of Integer with nil failed
+ArgumentError: comparison of Integer with String failed
+ArgumentError: comparison of Integer with String failed
+ArgumentError: comparison of Float with NaN failed
+ArgumentError: comparison of Float with nil failed
